@@ -6,11 +6,15 @@ import plotly.graph_objects as go
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 from tensorflow.keras.regularizers import l2
 import tensorflow as tf
 import streamlit as st
+
+# Define the model file path in the models directory
+MODEL_DIR = 'models'
+MODEL_FILE_PATH = os.path.join(MODEL_DIR, 'lstm_stock_model.h5')
 
 # Function to fetch stock data with input validation
 def fetch_stock_data(ticker):
@@ -119,6 +123,7 @@ def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batc
             tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
         ]
     )
+    model.save(MODEL_FILE_PATH)  # Save the model after training
     return model
 
 # Function to prepare data for LSTM
@@ -172,10 +177,18 @@ def calculate_prediction_intervals(model, X_test, y_test, alpha=0.05):
 def main():
     st.title("Stock Price Prediction with LSTM")
 
+    # Create the models directory if it doesn't exist
+    if not os.path.exists(MODEL_DIR):
+        os.makedirs(MODEL_DIR)
+
     # User input for stock ticker
     ticker = st.text_input("Enter the stock ticker (e.g., AAPL):", "AAPL")
 
-    if st.button("Fetch Data"):
+    # Check if the model already exists
+    if os.path.exists(MODEL_FILE_PATH):
+        model = load_model(MODEL_FILE_PATH)  # Load the existing model
+        st.write("Loaded existing model.")
+    else:
         # Fetch stock data
         data = fetch_stock_data(ticker)
         if data is None:
@@ -201,44 +214,44 @@ def main():
         # Train the model
         model = train_lstm_model(X_train, y_train, X_test, y_test)
 
-        # Calculate prediction intervals
-        y_pred, lower_bound, upper_bound = calculate_prediction_intervals(model, X_test, y_test)
+    # Calculate prediction intervals
+    y_pred, lower_bound, upper_bound = calculate_prediction_intervals(model, X_test, y_test)
 
-        # Inverse transform the predictions and bounds
-        y_pred = target_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
-        lower_bound = target_scaler.inverse_transform(lower_bound.reshape(-1, 1)).flatten()
-        upper_bound = target_scaler.inverse_transform(upper_bound.reshape(-1, 1)).flatten()
-        y_test = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+    # Inverse transform the predictions and bounds
+    y_pred = target_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+    lower_bound = target_scaler.inverse_transform(lower_bound.reshape(-1, 1)).flatten()
+    upper_bound = target_scaler.inverse_transform(upper_bound.reshape(-1, 1)).flatten()
+    y_test = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
 
-        # Calculate performance metrics
-        mae = mean_absolute_error(y_test, y_pred)
-        mse = mean_squared_error(y_test, y_pred)
-        rmse = np.sqrt(mse)
-        mape = np.mean(np.abs((y_test - y_pred) / (y_test + 1e-8))) * 100  # Avoid division by zero
+    # Calculate performance metrics
+    mae = mean_absolute_error(y_test, y_pred)
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mape = np.mean(np.abs((y_test - y_pred) / (y_test + 1e-8))) * 100  # Avoid division by zero
 
-        # Display evaluation metrics
-        st.subheader("Evaluation Metrics")
-        st.write(f"Mean Absolute Error (MAE): {mae:.2f}")
-        st.write(f"Mean Squared Error (MSE): {mse:.2f}")
-        st.write(f"Root Mean Squared Error (RMSE): {rmse:.2f}")
-        st.write(f"Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
+    # Display evaluation metrics
+    st.subheader("Evaluation Metrics")
+    st.write(f"Mean Absolute Error (MAE): {mae:.2f}")
+    st.write(f"Mean Squared Error (MSE): {mse:.2f}")
+    st.write(f"Root Mean Squared Error (RMSE): {rmse:.2f}")
+    st.write(f"Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
 
-        # Plotting Actual vs Predicted with Prediction Intervals
-        st.subheader("Actual vs Predicted Prices")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=y_test, mode='lines', name='Actual Prices', line=dict(color='blue')))
-        fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=y_pred, mode='lines', name='Predicted Prices', line=dict(color='red')))
-        fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=lower_bound, mode='lines', name='Lower Bound', line=dict(color='gray', dash='dash')))
-        fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=upper_bound, mode='lines', name='Upper Bound', line=dict(color='gray', dash='dash')))
-        fig.update_layout(title=f'Actual vs Predicted Stock Prices for {ticker} with Prediction Intervals',
-                          xaxis_title='Date',
-                          yaxis_title='Price')
-        st.plotly_chart(fig)
+    # Plotting Actual vs Predicted with Prediction Intervals
+    st.subheader("Actual vs Predicted Prices")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=y_test, mode='lines', name='Actual Prices', line=dict(color='blue')))
+    fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=y_pred, mode='lines', name='Predicted Prices', line=dict(color='red')))
+    fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=lower_bound, mode='lines', name='Lower Bound', line=dict(color='gray', dash='dash')))
+    fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=upper_bound, mode='lines', name='Upper Bound', line=dict(color='gray', dash='dash')))
+    fig.update_layout(title=f'Actual vs Predicted Stock Prices for {ticker} with Prediction Intervals',
+                      xaxis_title='Date',
+                      yaxis_title='Price')
+    st.plotly_chart(fig)
 
-        # Predict the next day's stock price
-        predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, window_size)
-        if predicted_price is not None:
-            st.write(f"The predicted closing price for the next trading day for {ticker} is: ${predicted_price:.2f}")
+    # Predict the next day's stock price
+    predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, window_size)
+    if predicted_price is not None:
+        st.write(f"The predicted closing price for the next trading day for {ticker} is: ${predicted_price:.2f}")
 
 if __name__ == "__main__":
     main()
