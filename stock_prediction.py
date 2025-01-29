@@ -117,7 +117,7 @@ class LSTMHyperModel(HyperModel):
         model = Sequential()
         # Use a fixed number of features here or pass it as an argument
         num_features = 15  # Adjust this based on your feature set
-        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32), return_sequences=True), input_shape=(None, num_features))))
+        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32), return_sequences=True), input_shape=(None, num_features)))
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float('dropout', 0.1, 0.5, step=0.1)))
         model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32)))
