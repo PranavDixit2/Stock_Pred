@@ -8,18 +8,20 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.impute import KNNImputer
+from sklearn.decomposition import PCA
+import shap
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, GRU, BatchNormalization
+from tensorflow.keras.regularizers import l2
+import tensorflow as tf
 import logging
 import streamlit as st
-from keras_tuner import HyperModel, RandomSearch
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Bidirectional, GRU, Dropout, Dense, BatchNormalization
+from kerastuner import HyperModel, RandomSearch
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
 # Function to fetch stock data with input validation
-@st.cache
 def fetch_stock_data(ticker):
     try:
         stock_data = yf.download(ticker)
@@ -29,8 +31,7 @@ def fetch_stock_data(ticker):
         return stock_data
     except Exception as e:
         logging.error(f"Error fetching stock data: {e}")
-        st.error(f"Error fetching stock data: {e}")
-        return None
+        exit()
 
 # Function to calculate EMA
 def calculate_ema(data, span):
@@ -115,12 +116,10 @@ def preprocess_data(data):
 class LSTMHyperModel(HyperModel):
     def build(self, hp):
         model = Sequential()
-        # Use a fixed number of features here or pass it as an argument
-        num_features = 15  # Adjust this based on your feature set
-        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32), return_sequences=True), input_shape=(None, num_features)))
+        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32), return_sequences=True), input_shape=(None, len(features))))
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float('dropout', 0.1, 0.5, step=0.1)))
-        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32)))
+        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32))))
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float('dropout', 0.1, 0.5, step=0.1)))
         model.add(Dense(1))  # Change to a single neuron for regression
@@ -189,59 +188,58 @@ def main():
     if st.button("Fetch Data"):
         data = fetch_stock_data(ticker)
 
-        if data is not None:
-            # Filter to keep only the last 90 trading days
-            data = data.tail(90)
+        # Filter to keep only the last 90 trading days
+        data = data.tail(90)
 
-            data = calculate_features(data)
-            data, features = preprocess_data(data)
+        data = calculate_features(data)
+        data, features = preprocess_data(data)
 
-            # Prepare data for LSTM
-            window_size = 10  # You can change this value to experiment
-            X, y, feature_scaler, target_scaler = prepare_data(data, features)
+        # Prepare data for LSTM
+        window_size = 10  # You can change this value to experiment
+        X, y, feature_scaler, target_scaler = prepare_data(data, features)
 
-            # Split the data into training and testing sets
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Split the data into training and testing sets
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-            # Train the model with hyperparameter tuning
-            model = train_model_with_tuning(X_train, y_train, X_test, y_test)
+        # Train the model with hyperparameter tuning
+        model = train_model_with_tuning(X_train, y_train, X_test, y_test)
 
-            # Calculate prediction intervals
-            y_pred, lower_bound, upper_bound = calculate_prediction_intervals(model, X_test, y_test)
+        # Calculate prediction intervals
+        y_pred, lower_bound, upper_bound = calculate_prediction_intervals(model, X_test, y_test)
 
-            # Inverse transform the predictions and bounds
-            y_pred = target_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
-            lower_bound = target_scaler.inverse_transform(lower_bound.reshape(-1, 1)).flatten()
-            upper_bound = target_scaler.inverse_transform(upper_bound.reshape(-1, 1)).flatten()
-            y_test = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+        # Inverse transform the predictions and bounds
+        y_pred = target_scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+        lower_bound = target_scaler.inverse_transform(lower_bound.reshape(-1, 1)).flatten()
+        upper_bound = target_scaler.inverse_transform(upper_bound.reshape(-1, 1)).flatten()
+        y_test = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
 
-            # Calculate performance metrics
-            mae = mean_absolute_error(y_test, y_pred)
-            mse = mean_squared_error(y_test, y_pred)
-            rmse = np.sqrt(mse)
-            mape = np.mean(np.abs((y_test - y_pred) / (y_test + 1e-8))) * 100  # Avoid division by zero
-            r_squared = r2_score(y_test, y_pred)
+        # Calculate performance metrics
+        mae = mean_absolute_error(y_test, y_pred)
+        mse = mean_squared_error(y_test, y_pred)
+        rmse = np.sqrt(mse)
+        mape = np.mean(np.abs((y_test - y_pred) / (y_test + 1e-8))) * 100  # Avoid division by zero
+        r_squared = r2_score(y_test, y_pred)
 
-            st.write(f'MAE: {mae:.2f}')
-            st.write(f'MSE: {mse:.2f}')
-            st.write(f'RMSE: {rmse:.2f}')
-            st.write(f'MAPE: {mape:.2f}%')
-            st.write(f'R-squared: {r_squared:.2f}')
+        st.write(f'MAE: {mae:.2f}')
+        st.write(f'MSE: {mse:.2f}')
+        st.write(f'RMSE: {rmse:.2f}')
+        st.write(f'MAPE: {mape:.2f}%')
+        st.write(f'R-squared: {r_squared:.2f}')
 
-            # Plotting Actual vs Predicted with Prediction Intervals using Plotly
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=y_test, mode='lines', name='Actual Prices', line=dict(color='blue')))
-            fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=y_pred, mode='lines', name='Predicted Prices', line=dict(color='red')))
-            fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=lower_bound, mode='lines', name='Lower Bound', line=dict(color='gray', dash='dash')))
-            fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=upper_bound, mode='lines', name='Upper Bound', line=dict(color='gray', dash='dash')))
-            fig.update_layout(title=f'Actual vs Predicted Stock Prices for {ticker} with Prediction Intervals',
-                              xaxis_title='Date',
-                              yaxis_title='Price')
-            st.plotly_chart(fig)
+        # Plotting Actual vs Predicted with Prediction Intervals using Plotly
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=y_test, mode='lines', name='Actual Prices', line=dict(color='blue')))
+        fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=y_pred, mode='lines', name='Predicted Prices', line=dict(color='red')))
+        fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=lower_bound, mode='lines', name='Lower Bound', line=dict(color='gray', dash='dash')))
+        fig.add_trace(go.Scatter(x=data.index[-len(y_test):], y=upper_bound, mode='lines', name='Upper Bound', line=dict(color='gray', dash='dash')))
+        fig.update_layout(title=f'Actual vs Predicted Stock Prices for {ticker} with Prediction Intervals',
+                          xaxis_title='Date',
+                          yaxis_title='Price')
+        st.plotly_chart(fig)
 
-            # Predict the next day's stock price
-            predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, window_size)
-            st.write(f"The predicted closing price for the next trading day for {ticker} is: {predicted_price:.2f}")
+        # Predict the next day's stock price
+        predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, window_size)
+        st.write(f"The predicted closing price for the next trading day for {ticker} is: {predicted_price:.2f}")
 
 if __name__ == "__main__":
     main()
