@@ -8,15 +8,12 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.impute import KNNImputer
-from sklearn.decomposition import PCA
-import shap
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, GRU, BatchNormalization
-from tensorflow.keras.regularizers import l2
 import tensorflow as tf
 import logging
 import streamlit as st
 from kerastuner import HyperModel, RandomSearch
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Bidirectional, GRU, BatchNormalization, Dropout, Dense
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -114,12 +111,16 @@ def preprocess_data(data):
 
 # Function to build and train LSTM model
 class LSTMHyperModel(HyperModel):
+    def __init__(self, num_features):
+        super().__init__()
+        self.num_features = num_features
+
     def build(self, hp):
         model = Sequential()
-        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32), return_sequences=True), input_shape=(None, len(features))))
+        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32), return_sequences=True), input_shape=(None, self.num_features)))
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float('dropout', 0.1, 0.5, step=0.1)))
-        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32))))
+        model.add(Bidirectional(GRU(hp.Int('units', min_value=32, max_value=256, step=32)))
         model.add(BatchNormalization())
         model.add(Dropout(hp.Float('dropout', 0.1, 0.5, step=0.1)))
         model.add(Dense(1))  # Change to a single neuron for regression
@@ -128,8 +129,8 @@ class LSTMHyperModel(HyperModel):
         return model
 
 # Function to train the model with hyperparameter tuning
-def train_model_with_tuning(X_train, y_train, X_test, y_test):
-    tuner = RandomSearch(LSTMHyperModel(), objective='val_mae', max_trials=5, executions_per_trial=3)
+def train_model_with_tuning(X_train, y_train, X_test, y_test, num_features):
+    tuner = RandomSearch(LSTMHyperModel(num_features), objective='val_mae', max_trials=5, executions_per_trial=3)
     tuner.search(X_train, y_train, epochs=50, validation_data=(X_test, y_test))
     best_model = tuner.get_best_models(num_models=1)[0]
     return best_model
@@ -202,7 +203,7 @@ def main():
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
         # Train the model with hyperparameter tuning
-        model = train_model_with_tuning(X_train, y_train, X_test, y_test)
+        model = train_model_with_tuning(X_train, y_train, X_test, y_test, len(features))
 
         # Calculate prediction intervals
         y_pred, lower_bound, upper_bound = calculate_prediction_intervals(model, X_test, y_test)
