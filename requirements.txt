@@ -7,3 +7,4 @@ plotly
 scikit-learn
 tensorflow
 keras-tuner
+shap
