@@ -37,9 +37,9 @@ def calculate_ema(data, span):
 # Function to calculate RSI
 def calculate_rsi(data, window=14):
     delta = data['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
+    gain = delta.where(delta > 0, 0).rolling(window=window).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=window).mean()
+    rs = gain / (loss + 1e-8)  # Prevent division by zero
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
