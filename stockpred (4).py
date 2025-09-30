@@ -171,7 +171,7 @@ def main():
         with st.spinner("Fetching and preparing data..."):
             data = fetch_stock_data(TICKER)
             
-            # Use the last 5 years of data for analysis, as done in your previous attempts
+            # Use the last 5 years of data for analysis
             data = data.tail(1250) 
             
             data = calculate_features(data.copy())
@@ -185,14 +185,13 @@ def main():
                  st.stop()
             
             # CRITICAL FIX: Use train_test_split for guaranteed consistency
-            # Shuffle=False maintains the time-series order, splitting the end chunk for testing
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=TEST_SIZE, shuffle=False, random_state=None
             )
             feature_count = X_train.shape[2]
 
         with st.spinner("Training model with hyperparameter tuning..."):
-            # Load or train model (Simplified to always train for demonstration)
+            # Load or train model
             model = train_model_with_tuning(X_train, y_train, X_test, y_test, feature_count)
             st.success("Training and tuning complete.")
 
@@ -200,8 +199,7 @@ def main():
         with st.spinner("Calculating predictions and metrics..."):
             
             # Calculate prediction intervals (predictions are still scaled change)
-            # NOTE: We use the simple residual method from your original code
-            y_pred_scaled = model.predict(X_test).flatten()
+            y_pred_scaled = model.predict(X_test, verbose=0).flatten()
             
             # Calculate residuals from the scaled predictions
             residuals_scaled = y_test - y_pred_scaled
@@ -230,35 +228,34 @@ def main():
             predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, WINDOW_SIZE)
             st.write(f"### Predicted next-day closing price for {TICKER}: ${predicted_price:.2f}")
 
-            # Plotting (requires conversion of percentage change back to price level for visual)
+            # --- Plotting Price Levels (Final Fix) ---
+            N_test = len(y_test)
             
-            # Get the closing price for the day BEFORE the test set starts
-            # The test set starts after X_train ends. The day before the first target is the last day of X_train's targets.
-            start_price_index = len(X) - len(X_test) - 1 # Index of the price that precedes the first test target
-            
-            # Convert percentage changes back to price levels for plotting
+            # Index of the price that precedes the first test target (t-1)
+            # len(X) - len(X_test) - 1 == Index of the close price used as P_t for the first P_t+1 prediction
+            start_price_index = len(X) - len(X_test) - 1 
             start_price = data['Close'].iloc[start_price_index]
             
-            # Create a base array for the test prices, starting with the price before the first target
-            price_base = np.insert(y_test_actual, 0, 0)
-            predicted_base = np.insert(y_pred, 0, 0)
+            # 1. Create base arrays (Length N_test + 1)
+            # Insert 0.0 at the beginning to act as the base for the cumulative product
+            price_base = np.insert(y_test_actual, 0, 0.0)
+            predicted_base = np.insert(y_pred, 0, 0.0)
             
-            # Cumulative product to get price level from percentage change
-            actual_prices = start_price * (1 + price_base).cumprod()
-            predicted_prices = start_price * (1 + predicted_base).cumprod()
+            # 2. Calculate cumulative product (Length N_test + 1)
+            actual_prices_full = start_price * (1 + price_base).cumprod()
+            predicted_prices_full = start_price * (1 + predicted_base).cumprod()
             
-            # Remove the initial base price (index 0) from the cumulative product arrays
-            actual_prices = actual_prices[1:]
-            predicted_prices = predicted_prices[1:]
+            # 3. Final slice to remove the starting price (Index 0), resulting in Length N_test
+            actual_prices = actual_prices_full[1:] 
+            predicted_prices = predicted_prices_full[1:] 
             
-            # Adjust bounds to price level (requires the same cumulative product logic)
-            # This is a simplification and the original quantile method applied to log returns is safer.
-            # Here we apply the bounds (which are already in absolute % change terms)
-            lower_bound_prices = actual_prices * (1 + lower_bound) / (1 + y_test_actual) 
-            upper_bound_prices = actual_prices * (1 + upper_bound) / (1 + y_test_actual)
+            # Adjust bounds to price level (using the relative change from the predicted prices)
+            # Note: This is a robust simplification of price-level confidence interval calculation
+            lower_bound_prices = predicted_prices + (lower_bound * start_price) 
+            upper_bound_prices = predicted_prices + (upper_bound * start_price) 
 
             # Plotting
-            test_dates = data.index[-len(y_test):]
+            test_dates = data.index[-N_test:]
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=test_dates, y=actual_prices, mode='lines', name='Actual Price Level', line=dict(color='blue')))
             fig.add_trace(go.Scatter(x=test_dates, y=predicted_prices, mode='lines', name='Predicted Price Level', line=dict(color='red', dash='dot')))
@@ -273,4 +270,5 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
 
 if __name__ == "__main__":
+    # Note: If running this as a full script, ensure you run the main() function here:
     main()
