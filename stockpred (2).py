@@ -75,32 +75,36 @@ def calculate_features(data):
     return data
 
 def preprocess_data(data):
-    # **CHANGE:** Target is now next-day Log Returns (Target = log(Price_t+1 / Price_t))
-    data['Next_Close'] = data['Close'].shift(-1)
-    data['Log_Return'] = np.log(data['Next_Close'] / data['Close'])
-
-    # Drop the last row which will have a NaN for Log_Return
-    data.dropna(subset=['Log_Return'], inplace=True)
-
-    target = data['Log_Return']
-    data = data.loc[target.index] # Align features with the target
-
+    # 1. Calculate the Log_Return for the entire dataset
+    # This creates a Series of daily log returns (NaN in the first row)
+    log_returns = np.log(data['Close'] / data['Close'].shift(1))
+    
+    # 2. The target for t is the log return of (t+1)/t. 
+    # We shift the log_returns Series back by one day to align Log_Return(t+1) with features(t).
+    target = log_returns.shift(-1)
+    
+    # 3. Create the list of features (unchanged from your original code)
     base_features = [
         'Open', 'High', 'Low', 'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
-        'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal',
+        'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal', 
         'Volume_Change', 'Price_Change'
     ]
-
     lagged_feature_bases = [
         'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
         'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal',
         'Volume_Change', 'Price_Change'
     ]
-
     features = base_features.copy()
     for feature_base in lagged_feature_bases:
         for lag in range(1, 6):
             features.append(f'Lag_{feature_base}_{lag}')
+
+    # 4. Drop any remaining NaNs in the target (the last row)
+    # and align the features DataFrame by filtering for the remaining index.
+    target.dropna(inplace=True)
+    
+    # Only return features that correspond to an existing target
+    data = data.loc[target.index] 
 
     return target, features
 
@@ -164,30 +168,27 @@ def plot_predictions(data_for_lstm, y_test_actual, y_pred, lower_bound, upper_bo
     st.plotly_chart(fig, use_container_width=True)
 
 def predict_next_day(model, data_processed, features, feature_scaler, target_scaler, window_size):
-    # Data for the current day (t)
-    current_data = data_processed[features].values[-1].reshape(1, -1)
-
-    # Data for the lookback window
+    # The current day's (t) features are used to predict the log return of (t+1)/t.
+    # The last_window_data correctly contains the features up to the last known day.
     last_window_data = data_processed[features].values[-window_size:]
-
+    
     # Scale the window data
     last_window_scaled = feature_scaler.transform(last_window_data)
     last_window_reshaped = last_window_scaled.reshape((1, window_size, len(features)))
-
+    
     # Predict the next-day log return
     predicted_log_return_scaled = model.predict(last_window_reshaped, verbose=0)
-
+    
     # Invert scaling to get the actual predicted log return
     predicted_log_return = target_scaler.inverse_transform(predicted_log_return_scaled).flatten()[0]
-
+    
     # Get today's closing price
     close_t = data_processed['Close'].iloc[-1]
-
-    # **CHANGE:** Calculate the next-day price (t+1)
+    
+    # Calculate the next-day price (t+1)
     predicted_price = close_t * np.exp(predicted_log_return)
-
+    
     return predicted_price
-
 # --- Streamlit UI ---
 
 st.title("Stock Price Prediction with Bidirectional LSTM (Log Returns)")
