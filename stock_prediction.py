@@ -12,6 +12,7 @@ import tensorflow as tf
 import streamlit as st 
 import joblib # Required for scaler persistence 
 import warnings 
+from sklearn.model_selection import train_test_split # Explicitly ensure this is imported
 
 # Suppress TensorFlow warnings 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -49,9 +50,9 @@ def calculate_bollinger_bands(data, window=20):
     """Calculates Bollinger Bands (2 std deviations)."""
     sma = data['Close'].rolling(window=window).mean() 
     std_dev = data['Close'].rolling(window=window).std() 
-    data = sma + (2 * std_dev) 
-    data = sma - (2 * std_dev) 
-    return data 
+    data = sma + (2 * std_dev)
+    data = sma - (2 * std_dev)
+    return data
 
 def calculate_macd(data, short_window=12, long_window=26, signal_window=9): 
     """Calculates Moving Average Convergence Divergence (MACD)."""
@@ -103,7 +104,7 @@ def preprocess_data(data):
     data.dropna(inplace=True) 
     
     # Final comprehensive feature list
-    features = 
+    features =
     
     # Add all 35 lagged features 
     lag_features_base =
@@ -124,12 +125,12 @@ def prepare_data(data, features, window_size=10):
     scaled_features = feature_scaler.fit_transform(data[features]) 
 
     # 2. Create Sequences (X)
-    # X:
+    # X: (Samples, Time Steps (Window Size), Features)
     X = np.array([scaled_features[i-window_size:i] 
                   for i in range(window_size, len(scaled_features))]) 
     
     # 3. Scale Target (y)
-    y_raw = data.values[window_size:]
+    y_raw = data.values[window_size:] # Target column
     y = target_scaler.fit_transform(y_raw.reshape(-1, 1)).flatten() 
 
     return X, y, feature_scaler, target_scaler 
@@ -138,7 +139,8 @@ def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batc
     """Builds and trains the Bidirectional LSTM model with regularization and callbacks."""
     
     # Architectural configuration
-    input_shape = (X_train.shape, X_train.shape) # (WINDOW_SIZE, Num_Features)
+    # Correctly extracting the input shape: (Timesteps, Num_Features)
+    input_shape = (X_train.shape, X_train.shape) 
     
     model = Sequential() 
 
@@ -150,15 +152,17 @@ def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batc
     st.info("Starting model training (B-LSTM)...")
     
     # Training protocol with adaptive callbacks
+    callbacks_list =
+
     history = model.fit( 
         X_train, y_train, 
         epochs=epochs, 
         batch_size=batch_size, 
         validation_data=(X_test, y_test), 
-        callbacks=,
+        callbacks=callbacks_list,
         verbose=0 
     ) 
-    st.success(f"Training finished. Best validation loss achieved in epoch {len(history.history['loss']) - 10}.")
+    st.success(f"Training finished. Model restored to best weights based on validation loss.")
     return model 
 
 # --- III. MODEL PERSISTENCE AND INFERENCE --- 
@@ -218,7 +222,7 @@ def predict_next_day(model, data, features, feature_scaler, target_scaler, windo
     predicted_price_scaled = model.predict(last_data_reshaped, verbose=0) 
     
     # 5. Inverse transform to actual dollar price
-    predicted_price = target_scaler.inverse_transform([[predicted_price_scaled]]) 
+    predicted_price = target_scaler.inverse_transform(predicted_price_scaled) 
     return predicted_price 
 
 # --- IV. EVALUATION AND UNCERTAINTY QUANTIFICATION --- 
@@ -316,23 +320,25 @@ def main():
     model, feature_scaler, target_scaler = load_model_and_scalers(ticker) 
     
     # 2. Fetch data (Required even if model is loaded, to get latest sequence for prediction)
-    data = fetch_stock_data(ticker) 
-    if data is None: 
+    data_raw = fetch_stock_data(ticker) 
+    if data_raw is None: 
         return 
 
     # 3. Calculate features and preprocess (on full history)
+    # Use a copy to avoid modifying the original data_raw state
+    data = data_raw.copy()
     data = calculate_features(data) 
     data, features = preprocess_data(data) 
     
     # 4. Prepare data for sequence modeling
     X, y, initial_feature_scaler, initial_target_scaler = prepare_data(data, features, WINDOW_SIZE) 
     
-    if len(X) < WINDOW_SIZE + 20: 
-        st.error("Insufficient samples after cleaning and windowing. Required > 30 samples.")
+    if len(X) < 30: # Minimum reasonable length for split
+        st.error(f"Insufficient samples ({len(X)}) after cleaning and windowing. Required at least 30 samples for meaningful training.")
         return
 
     # Split the data chronologically (80% training, 20% testing)
-    test_size = int(len(X) * 0.2) 
+    test_size = max(int(len(X) * 0.2), 10) # Ensure at least 10 samples for test set
     X_train = X[:-test_size] 
     X_test = X[-test_size:] 
     y_train = y[:-test_size] 
