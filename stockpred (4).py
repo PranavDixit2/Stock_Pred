@@ -18,7 +18,20 @@ import logging
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
-# --- Feature & Data Functions (Unchanged) ---
+# --- External Data Fetching and Feature Calculation ---
+
+def fetch_external_data():
+    """Fetches S&P 500 and VIX data for market context."""
+    tickers = ['^GSPC', '^VIX']
+    
+    # Fetch data for the last 5 years + buffer
+    market_data = yf.download(tickers, period="6y", progress=False)
+    
+    # Calculate daily returns for S&P 500 and VIX
+    market_data['GSPC_Return'] = market_data['Close']['^GSPC'].pct_change()
+    market_data['VIX_Change'] = market_data['Close']['^VIX'].pct_change()
+    
+    return market_data[['GSPC_Return', 'VIX_Change']]
 
 def fetch_stock_data(ticker):
     data_raw = yf.download(ticker)
@@ -72,14 +85,27 @@ def calculate_features(data):
     data.dropna(inplace=True)
     return data
 
-def preprocess_data(data):
+def preprocess_data(data, market_data):
+    # 1. Merge the data with external features
+    data = data.merge(market_data, how='left', left_index=True, right_index=True)
+    
+    # 2. Shift the external features back by one day to act as predictors for t+1
+    # Today's market return predicts tomorrow's stock return.
+    data['Prev_GSPC_Return'] = data['GSPC_Return'].shift(1)
+    data['Prev_VIX_Change'] = data['VIX_Change'].shift(1)
+
+    # 3. Target is the next day's percentage change (t+1)
     data['Target'] = data['Close'].pct_change().shift(-1)
+    
+    # Drop the original, non-lagged market data and any NaNs
+    data.drop(columns=['GSPC_Return', 'VIX_Change'], inplace=True)
     data.dropna(inplace=True)
     
+    # Define features including the new external ones
     features = [col for col in data.columns if col not in ['Target', 'Adj Close']]
     return data, features
 
-# --- LSTM Model & Training Functions ---
+# --- LSTM Model & Training Functions (Huber Loss retained) ---
 
 class LSTMHyperModel(HyperModel):
     def __init__(self, feature_count):
@@ -88,22 +114,19 @@ class LSTMHyperModel(HyperModel):
     def build(self, hp):
         model = Sequential()
         
-        # Reduced max units to 128
+        # Architecture constrained for stability
         model.add(Bidirectional(GRU(hp.Int('units_1', min_value=32, max_value=128, step=32), 
                                     return_sequences=True), input_shape=(None, self.feature_count)))
         model.add(BatchNormalization())
-        # Reduced max dropout to 0.3
         model.add(Dropout(hp.Float('dropout_1', 0.1, 0.3, step=0.1)))
         
-        # Reduced max units to 128
         model.add(Bidirectional(GRU(hp.Int('units_2', min_value=32, max_value=128, step=32))))
         model.add(BatchNormalization())
-        # Reduced max dropout to 0.3
         model.add(Dropout(hp.Float('dropout_2', 0.1, 0.3, step=0.1)))
         
         model.add(Dense(1)) 
         
-        # Using Huber Loss to penalize outliers less
+        # Huber Loss retained for outlier resilience
         model.compile(optimizer=tf.keras.optimizers.Adam(hp.Float('learning_rate', 1e-4, 1e-3, sampling='LOG')),
                       loss=tf.keras.losses.Huber(delta=1.0), metrics=['mae'])
         return model
@@ -115,41 +138,31 @@ def train_model_with_tuning(X_train, y_train, X_test, y_test, feature_count):
                          max_trials=10, 
                          executions_per_trial=1,
                          directory='kt_dir',
-                         project_name='stock_pred_no_pca') # Updated project name
+                         project_name='stock_pred_external_v3')
     
     callbacks_list = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)]
 
-    # Increased epochs for better training
     tuner.search(X_train, y_train, epochs=50, validation_data=(X_test, y_test), callbacks=callbacks_list, verbose=0)
     best_model = tuner.get_best_models(num_models=1)[0]
     return best_model
-
-# --- Data Preparation & Prediction Functions (PCA removed) ---
 
 def prepare_data(data, features, window_size=20): 
     feature_scaler = MinMaxScaler()
     target_scaler = MinMaxScaler()
 
-    # NO PCA: Use all features
     scaled_features = feature_scaler.fit_transform(data[features])
     
-    # Feature count is the actual number of features
-    
-    # Create time series windows (X)
     X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
     
-    # Target variable (y)
     y_raw = data['Target'].values[window_size:]
     y = target_scaler.fit_transform(y_raw.reshape(-1, 1)).flatten()
     
-    # Return features count for model building
     return X, y, feature_scaler, target_scaler, len(features) 
 
 def predict_next_day(model, data, features, feature_scaler, target_scaler, window_size=20):
     last_data = data[features].values[-window_size:]
     last_data_scaled = feature_scaler.transform(last_data)
     
-    # NO PCA: Reshape the full scaled data 
     last_data_reshaped = last_data_scaled.reshape((1, window_size, len(features)))
 
     predicted_change_scaled = model.predict(last_data_reshaped, verbose=0)[0][0]
@@ -161,7 +174,7 @@ def predict_next_day(model, data, features, feature_scaler, target_scaler, windo
     
     return float(predicted_price)
 
-# --- Evaluation Functions (Metrics function is safe) ---
+# --- Streamlit Application ---
 
 def display_evaluation_metrics(y_test_actual, y_pred):
     y_true_safe = np.array(y_test_actual)
@@ -182,11 +195,9 @@ def display_evaluation_metrics(y_test_actual, y_pred):
     st.write(f"- Root Mean Squared Error (RMSE): {rmse:.4f}")
     st.write(f"- Mean Absolute Percentage Error (MAPE): {mape:.2f}% (Ignored due to near-zero targets)")
 
-# --- Streamlit Application ---
-
 def main():
-    st.title("Stock Price Prediction with B-GRU LSTM (Full Features & Huber Loss)")
-    st.write("Optimized for performance with enhanced hyperparameter tuning and robust loss function.")
+    st.title("Stock Price Prediction with B-GRU LSTM (External Features Enhanced)")
+    st.write("Optimized with market context (S\&P 500 \& VIX) and robust tuning.")
 
     TICKER = st.text_input("Enter the stock ticker (e.g., AAPL):", "AAPL").upper()
     WINDOW_SIZE = st.sidebar.slider("LSTM Lookback Window", min_value=10, max_value=30, value=20)
@@ -194,15 +205,20 @@ def main():
 
     if st.button("Run Prediction"):
         
-        with st.spinner("Fetching and preparing data..."):
-            data = fetch_stock_data(TICKER)
+        with st.spinner("Fetching and merging data..."):
+            stock_data = fetch_stock_data(TICKER)
+            market_data = fetch_external_data()
             
-            data = data.tail(1250)
+            # Use the last 5 years of stock data
+            stock_data = stock_data.tail(1250)
             
-            data = calculate_features(data.copy())
-            data, features = preprocess_data(data.copy())
+            # Calculate technical features
+            data_with_features = calculate_features(stock_data.copy())
+            
+            # Preprocess and merge with external features
+            data, features = preprocess_data(data_with_features.copy(), market_data)
 
-            # Prepare data for LSTM (PCA removed)
+            # Prepare data for LSTM
             X, y, feature_scaler, target_scaler, feature_count = prepare_data(data, features, WINDOW_SIZE)
             
             if len(X) < 50:
@@ -214,7 +230,6 @@ def main():
             )
 
         with st.spinner("Training model with hyperparameter tuning..."):
-            # feature_count is the full number of features
             model = train_model_with_tuning(X_train, y_train, X_test, y_test, feature_count)
             st.success("Training and tuning complete.")
 
@@ -234,11 +249,10 @@ def main():
 
             display_evaluation_metrics(y_test_actual, y_pred)
             
-            # Predict next day (PCA removed)
             predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, WINDOW_SIZE)
             st.write(f"### Predicted next-day closing price for {TICKER}: **${predicted_price:.2f}**")
 
-            # --- Plotting Price Levels (unchanged) ---
+            # --- Plotting Price Levels ---
             N_test = len(y_test)
             
             start_price_index = len(X) - len(X_test) - 1 
