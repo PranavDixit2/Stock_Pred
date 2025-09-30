@@ -13,7 +13,7 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 from tensorflow.keras.models import Sequential
 
-# --- Feature calculation functions (unchanged) ---
+# --- Feature calculation functions (omitted for brevity) ---
 
 def calculate_ema(data, span):
     return data['Close'].ewm(span=span, adjust=False).mean()
@@ -91,20 +91,24 @@ def preprocess_data(data):
     data = data.loc[target.index] 
     return target, features
 
-def prepare_data(data, features, target, window_size):
-    # NOTE: Scalers are fit here on ALL available data
+def prepare_data(data_df, features, target_series, window_size, feature_scaler, target_scaler):
+    # Only scale and window the provided (sliced) data
+    scaled_features = feature_scaler.transform(data_df[features])
+    X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
+    y_raw = target_series.values[window_size:]
+    y = target_scaler.transform(y_raw.reshape(-1, 1)).flatten()
+    return X, y
+
+def fit_scalers(data_df, features, target_series):
     feature_scaler = MinMaxScaler()
     target_scaler = MinMaxScaler()
-    scaled_features = feature_scaler.fit_transform(data[features])
-    X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
-    y_raw = target.values[window_size:]
-    y = target_scaler.fit_transform(y_raw.reshape(-1, 1)).flatten()
-    return X, y, feature_scaler, target_scaler
+    feature_scaler.fit(data_df[features])
+    target_scaler.fit(target_series.values.reshape(-1, 1))
+    return feature_scaler, target_scaler
 
 def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion):
-    # FIX: Explicitly cast to numpy array and ensure 1D shape immediately.
+    # Ensure all predictions are clean, 1D NumPy arrays
     y_pred_scaled = np.array(model.predict(X_test, verbose=0)).flatten()
-    
     y_pred_log_return = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
     
     # If data_for_inversion has been correctly sliced to length N+1 (P_t and P_t+1):
@@ -134,8 +138,6 @@ def display_evaluation_metrics(y_test_actual, y_pred):
     st.write(f"- Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
 
 def plot_predictions(data_for_lstm, y_test_actual, y_pred, lower_bound, upper_bound):
-    # NOTE: The plotting needs the index from the data_for_lstm, but only for the test period
-    # We use the length of y_test_actual to correctly determine the test dates.
     test_dates = data_for_lstm.index[-len(y_test_actual):]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=test_dates, y=y_test_actual, mode='lines', name='Actual Prices', line=dict(color='blue', width=2)))
@@ -164,7 +166,7 @@ TICKER = st.text_input("Enter Stock Ticker (e.g. AAPL)", value="AAPL").upper()
 WINDOW_SIZE = st.sidebar.slider("LSTM Lookback Window", min_value=10, max_value=30, value=20) 
 TRAIN_EPOCHS = 50
 
-if st.button("Run Prediction (Improved Model)"):
+if st.button("Run Prediction (Final Fix)"):
 
     model_path = f"lstm_model_returns_{TICKER}.keras"
     scaler_path = f"scalers_returns_{TICKER}.joblib"
@@ -185,23 +187,49 @@ if st.button("Run Prediction (Improved Model)"):
         target, features = preprocess_data(data_features.copy()) 
         data_for_lstm = data_features.loc[target.index].copy()
         
-        X_all, y_all, feature_scaler, target_scaler = prepare_data(data_for_lstm, features, target, WINDOW_SIZE)
+        # Determine lengths for splitting
+        N_samples = len(data_for_lstm)
+        test_size_df = max(int(N_samples * 0.2), 10)
+        
+        # 1. SPLIT DATAFRAME FIRST (TRAIN & TEST)
+        train_data_df = data_for_lstm.iloc[:-test_size_df]
+        test_data_df = data_for_lstm.iloc[-test_size_df:]
+        
+        train_target = target.iloc[:-test_size_df]
+        test_target = target.iloc[-test_size_df:]
+        
+        # 2. FIT SCALERS ON FULL TRAINING DATASET (BEFORE WINDOWING)
+        feature_scaler, target_scaler = fit_scalers(data_for_lstm, features, target)
 
-    if len(X_all) < 30:
-        st.error(f"Insufficient samples ({len(X_all)}) after cleaning and windowing. Need at least 30.")
+        # 3. CREATE WINDOWED ARRAYS (X_train, X_test, y_train, y_test)
+        # We MUST ensure the window size is respected.
+        if len(train_data_df) < WINDOW_SIZE:
+             st.error(f"Training data ({len(train_data_df)} samples) is too short for window size ({WINDOW_SIZE}).")
+             st.stop()
+             
+        # X_train and y_train
+        X_train, y_train = prepare_data(train_data_df, features, train_target, WINDOW_SIZE, feature_scaler, target_scaler)
+        
+        # X_test and y_test: Need to include the end of the training data in the test features for the first window
+        # Create a combined slice of (WINDOW_SIZE - 1) days of training data + test_data_df
+        test_feature_window_start_index = len(data_for_lstm) - test_size_df - WINDOW_SIZE + 1
+        
+        # The data we need to create the test set X_test. Includes overlap from training set.
+        data_for_X_test = data_for_lstm.iloc[test_feature_window_start_index:]
+        
+        # X_test and y_test
+        X_test, y_test = prepare_data(data_for_X_test, features, target.iloc[test_feature_window_start_index:], WINDOW_SIZE, feature_scaler, target_scaler)
+
+
+    if len(X_train) < 1:
+        st.error(f"Insufficient samples ({len(X_train)}) after cleaning and windowing for training.")
         st.stop()
 
-    test_size = max(int(len(X_all) * 0.2), 10)
-    
-    # FIX: Slice X_test and y_test from the full NumPy arrays to ensure clean input
-    X_train, X_test = X_all[:-test_size], X_all[-test_size:]
-    y_train, y_test = y_all[:-test_size], y_all[-test_size:]
-    
     N_test = len(y_test)
     
-    # This slicing remains correct for the required N_test + 1 rows of 'Close' prices
-    data_for_inversion_all = data_for_lstm.iloc[WINDOW_SIZE:].copy() 
-    data_for_inversion = data_for_inversion_all[['Close']].iloc[-(N_test + 1):].copy()
+    # 4. SLICE INVERSION DATA (cleanly isolated)
+    # This must be the last N_test + 1 days of the price data BEFORE the final prediction day.
+    data_for_inversion = data_for_lstm[['Close']].iloc[-(N_test + 1):].copy()
 
     if os.path.exists(model_path) and os.path.exists(scaler_path):
         model = load_model(model_path)
@@ -236,7 +264,7 @@ if st.button("Run Prediction (Improved Model)"):
         joblib.dump((feature_scaler, target_scaler), scaler_path)
         st.success("Training complete and model saved.")
 
-    # These outputs should now be clean arrays of length N_test
+    # Execute prediction and evaluation
     y_pred, lower_bound, upper_bound, y_test_actual = calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion)
     predicted_price = predict_next_day(model, data_for_lstm, features, feature_scaler, target_scaler, WINDOW_SIZE)
 
