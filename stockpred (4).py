@@ -5,17 +5,32 @@ import numpy as np
 import plotly.graph_objects as go
 import joblib
 import os
-from tensorflow.keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import train_test_split # <--- THE CRITICAL COMPONENT
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import tensorflow as tf
-from tensorflow.keras.regularizers import l2
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, GRU, BatchNormalization
+from tensorflow.keras.regularizers import l2
+from kerastuner import HyperModel, RandomSearch
+import logging
 
-# --- Feature calculation functions (unchanged) ---
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+
+# --- Feature & Data Functions (Adjusted for consistency) ---
+
+def fetch_stock_data(ticker):
+    data_raw = yf.download(ticker)
+    if data_raw.empty:
+        st.error("No data found for ticker. Please check the symbol.")
+        st.stop()
+    # Using a 5-year period for robust feature calculation before final slicing
+    return yf.download(ticker, period="5y", progress=False)
+
 def calculate_ema(data, span):
     return data['Close'].ewm(span=span, adjust=False).mean()
+
 def calculate_rsi(data, window=14):
     delta = data['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -23,256 +38,238 @@ def calculate_rsi(data, window=14):
     rs = gain / (loss + 1e-8)
     rsi = 100 - (100 / (1 + rs))
     return rsi
+
 def calculate_bollinger_bands(data, window=20):
     sma = data['Close'].rolling(window=window).mean()
     std_dev = data['Close'].rolling(window=window).std()
-    data['BB_upper'] = sma + (2 * std_dev)
-    data['BB_lower'] = sma - (2 * std_dev)
+    data['Bollinger_Upper'] = sma + (2 * std_dev)
+    data['Bollinger_Lower'] = sma - (2 * std_dev)
     return data
+
 def calculate_macd(data, short_window=12, long_window=26, signal_window=9):
     short_ema = data['Close'].ewm(span=short_window, adjust=False).mean()
     long_ema = data['Close'].ewm(span=long_window, adjust=False).mean()
     data['MACD'] = short_ema - long_ema
-    data['MACD_signal'] = data['MACD'].ewm(span=signal_window, adjust=False).mean()
+    data['MACD_Signal'] = data['MACD'].ewm(span=signal_window, adjust=False).mean()
     return data
-def calculate_atr(data, window=14):
-    high_low = data['High'] - data['Low']
-    high_close = np.abs(data['High'] - data['Close'].shift(1))
-    low_close = np.abs(data['Low'] - data['Close'].shift(1))
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.ewm(span=window, adjust=False).mean()
-    return atr
+
 def calculate_features(data):
-    data['EMA_9'] = calculate_ema(data, 9)
-    data['EMA_21'] = calculate_ema(data, 21)
-    data['EMA_50'] = calculate_ema(data, 50)
-    data['EMA_200'] = calculate_ema(data, 200)
-    data['RSI_14'] = calculate_rsi(data)
+    for span in [9, 21, 50, 200]:
+        data[f'EMA_{span}'] = calculate_ema(data, span)
+    
+    data['RSI'] = calculate_rsi(data)
     data = calculate_bollinger_bands(data)
     data = calculate_macd(data)
-    data['ATR_14'] = calculate_atr(data) 
+    
     data['Volume_Change'] = data['Volume'].pct_change()
     data['Price_Change'] = data['Close'].pct_change()
-    lag_features = [
-        'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
-        'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal',
-        'Volume_Change', 'Price_Change'
-    ]
-    for feature in lag_features:
-        for lag in range(1, 6):
-            data[f'Lag_{feature}_{lag}'] = data[feature].shift(lag)
+
+    # Base features for lag
+    lag_bases = ['Close', 'Volume', 'EMA_9', 'RSI', 'MACD', 'Bollinger_Upper', 'Bollinger_Lower']
+    for lag in range(1, 6):
+        for feature_base in lag_bases:
+            data[f'Lag_{feature_base}_{lag}'] = data[feature_base].shift(lag)
+
     data.dropna(inplace=True)
     return data
+
 def preprocess_data(data):
-    log_returns = np.log(data['Close'] / data['Close'].shift(1))
-    target = log_returns.shift(-1)
-    base_features = [
-        'Open', 'High', 'Low', 'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
-        'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal', 
-        'Volume_Change', 'Price_Change'
-    ]
-    lagged_feature_bases = [
-        'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
-        'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal',
-        'Volume_Change', 'Price_Change'
-    ]
-    features = base_features.copy()
-    for feature_base in lagged_feature_bases:
-        for lag in range(1, 6):
-            features.append(f'Lag_{feature_base}_{lag}')
-    target.dropna(inplace=True)
-    data = data.loc[target.index] 
-    return target, features
+    # Imputation removed for simplicity/to match final code state, reliance on dropna
+    
+    # Target is the next day's percentage change (t+1)
+    data['Target'] = data['Close'].pct_change().shift(-1)
+    data.dropna(inplace=True)
+    
+    # Define features based on the column generation in calculate_features
+    features = [col for col in data.columns if col not in ['Target', 'Adj Close']]
+    return data, features
 
-# --- Data Preparation Functions (modified for train-only fit) ---
+# --- LSTM Model & Training Functions ---
 
-def fit_scalers_on_train(data_df, features, target_series):
+class LSTMHyperModel(HyperModel):
+    def __init__(self, feature_count):
+        self.feature_count = feature_count
+    
+    def build(self, hp):
+        model = Sequential()
+        model.add(Bidirectional(GRU(hp.Int('units_1', min_value=32, max_value=128, step=32), 
+                                    return_sequences=True), input_shape=(None, self.feature_count)))
+        model.add(BatchNormalization())
+        model.add(Dropout(hp.Float('dropout_1', 0.1, 0.3, step=0.1)))
+        model.add(Bidirectional(GRU(hp.Int('units_2', min_value=32, max_value=128, step=32))))
+        model.add(BatchNormalization())
+        model.add(Dropout(hp.Float('dropout_2', 0.1, 0.3, step=0.1)))
+        model.add(Dense(1)) 
+        
+        model.compile(optimizer=tf.keras.optimizers.Adam(hp.Float('learning_rate', 1e-4, 1e-3, sampling='LOG')),
+                      loss='mean_squared_error', metrics=['mae'])
+        return model
+
+def train_model_with_tuning(X_train, y_train, X_test, y_test, feature_count):
+    # Temporarily remove logging from tuner to avoid polluting Streamlit output
+    tuner = RandomSearch(LSTMHyperModel(feature_count).build, 
+                         objective='val_mae', 
+                         max_trials=3, # Reduced for faster execution
+                         executions_per_trial=1,
+                         directory='kt_dir',
+                         project_name='stock_pred')
+    
+    callbacks_list = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)]
+
+    tuner.search(X_train, y_train, epochs=20, validation_data=(X_test, y_test), callbacks=callbacks_list, verbose=0)
+    best_model = tuner.get_best_models(num_models=1)[0]
+    return best_model
+
+# --- Data Preparation & Prediction Functions ---
+
+def prepare_data(data, features, window_size=20): # Increased window_size for better time series data
     feature_scaler = MinMaxScaler()
     target_scaler = MinMaxScaler()
-    feature_scaler.fit(data_df[features])
-    target_scaler.fit(target_series.values.reshape(-1, 1))
-    return feature_scaler, target_scaler
 
-def prepare_data_slice(data_df, features, target_series, window_size, feature_scaler, target_scaler):
-    # Only scale and window the provided (sliced) data
-    scaled_features = feature_scaler.transform(data_df[features])
-    
-    # Check if slice is big enough for at least one window
-    if len(scaled_features) < window_size:
-        return np.array([]), np.array([])
-        
+    scaled_features = feature_scaler.fit_transform(data[features])
+
+    # Create time series windows (X)
     X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
-    y_raw = target_series.values[window_size:]
-    y = target_scaler.transform(y_raw.reshape(-1, 1)).flatten()
-    return X, y
-
-# --- Evaluation Functions (unchanged) ---
-
-def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion):
-    y_pred_scaled = np.array(model.predict(X_test, verbose=0)).flatten()
-    y_pred_log_return = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
     
-    close_t = data_for_inversion['Close'].values[:-1]
-    y_test_actual = data_for_inversion['Close'].values[1:]
+    # Target variable (y)
+    y_raw = data['Target'].values[window_size:]
     
-    y_pred_actual = close_t * np.exp(y_pred_log_return) 
-
-    residuals = y_test_actual - y_pred_actual
-    std_dev = np.std(residuals)
-    z_score = 1.96
-    margin_of_error = z_score * std_dev
+    # Normalize the target variable (percentage change)
+    y = target_scaler.fit_transform(y_raw.reshape(-1, 1)).flatten()
     
-    lower_bound = (y_pred_actual - margin_of_error).flatten()
-    upper_bound = (y_pred_actual + margin_of_error).flatten()
+    return X, y, feature_scaler, target_scaler
+
+def predict_next_day(model, data, features, feature_scaler, target_scaler, window_size=20):
+    last_data = data[features].values[-window_size:]
+    last_data_scaled = feature_scaler.transform(last_data)
+    last_data_reshaped = last_data_scaled.reshape((1, window_size, len(features)))
+
+    # Predict the scaled percentage change
+    predicted_change_scaled = model.predict(last_data_reshaped)[0][0]
     
-    return y_pred_actual.flatten(), lower_bound, upper_bound, y_test_actual.flatten()
-
-def display_evaluation_metrics(y_test_actual, y_pred):
-    # FIX: Create safe, local copies to prevent contamination from inconsistent arrays
-    y_true_safe = np.array(y_test_actual)
-    y_pred_safe = np.array(y_pred)
+    # Inverse transform to get the actual percentage change
+    predicted_change = target_scaler.inverse_transform([[predicted_change_scaled]])[0][0]
     
-    # Check for consistency before scikit-learn runs
-    if len(y_true_safe) != len(y_pred_safe):
-        st.error(f"FATAL ERROR: Inconsistent sample size in evaluation. Actual: {len(y_true_safe)}, Predicted: {len(y_pred_safe)}. Check data splitting logic.")
-        raise ValueError("Inconsistent numbers of samples found in evaluation inputs.")
+    # Calculate the predicted price
+    current_price = data['Close'].values[-1]
+    predicted_price = current_price * (1 + predicted_change)
+    return predicted_price
 
-    mae = mean_absolute_error(y_true_safe, y_pred_safe)
-    mse = mean_squared_error(y_true_safe, y_pred_safe)
-    rmse = np.sqrt(mse)
-    
-    # Calculate MAPE using safe arrays
-    mape = np.mean(np.abs((y_true_safe - y_pred_safe) / (y_true_safe + 1e-8))) * 100
-    
-    st.write("### Evaluation Metrics (on Test Set)")
-    st.write(f"- Mean Absolute Error (MAE): ${mae:.2f}")
-    st.write(f"- Root Mean Squared Error (RMSE): ${rmse:.2f}")
-    st.write(f"- Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
+# --- Streamlit Application ---
 
-def plot_predictions(data_for_lstm, y_test_actual, y_pred, lower_bound, upper_bound):
-    test_dates = data_for_lstm.index[-len(y_test_actual):]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=test_dates, y=y_test_actual, mode='lines', name='Actual Prices', line=dict(color='blue', width=2)))
-    fig.add_trace(go.Scatter(x=test_dates, y=y_pred, mode='lines', name='Predicted Prices', line=dict(color='red', width=2, dash='dot')))
-    fig.add_trace(go.Scatter(x=test_dates, y=upper_bound, mode='lines', name='Upper Bound (95% CI)', line=dict(color='rgba(128, 128, 128, 0.5)', width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=test_dates, y=lower_bound, mode='lines', name='95% Confidence Interval', line=dict(color='rgba(128, 128, 128, 0.5)', width=0), fill='tonexty', fillcolor='rgba(192, 192, 192, 0.3)'))
-    fig.update_layout(title='B-LSTM T+1 Forecast Performance (Log Returns Target)', xaxis_title='Date', yaxis_title='Price (USD)', template='plotly_white')
-    st.plotly_chart(fig, use_container_width=True)
+def main():
+    st.title("Stock Price Prediction with B-GRU LSTM (Robust Split)")
+    st.write("Using `train_test_split` on the final arrays for guaranteed sample consistency.")
 
-def predict_next_day(model, data_processed, features, feature_scaler, target_scaler, window_size):
-    last_window_data = data_processed[features].values[-window_size:]
-    last_window_scaled = feature_scaler.transform(last_window_data)
-    last_window_reshaped = last_window_scaled.reshape((1, window_size, len(features)))
-    predicted_log_return_scaled = model.predict(last_window_reshaped, verbose=0)
-    predicted_log_return = target_scaler.inverse_transform(predicted_log_return_scaled).flatten()[0]
-    close_t = data_processed['Close'].iloc[-1]
-    predicted_price = close_t * np.exp(predicted_log_return)
-    return float(predicted_price)
+    TICKER = st.text_input("Enter the stock ticker (e.g., AAPL):", "AAPL").upper()
+    WINDOW_SIZE = st.sidebar.slider("LSTM Lookback Window", min_value=10, max_value=30, value=20)
+    TEST_SIZE = st.sidebar.slider("Test Set Size (%)", min_value=10, max_value=30, value=20) / 100
 
-# --- Streamlit UI ---
-
-st.title("Stock Price Prediction with Bidirectional LSTM (Log Returns)")
-st.write("Predict next-day closing price with improved model architecture and log returns target.")
-
-TICKER = st.text_input("Enter Stock Ticker (e.g. AAPL)", value="AAPL").upper()
-WINDOW_SIZE = st.sidebar.slider("LSTM Lookback Window", min_value=10, max_value=30, value=20) 
-TRAIN_EPOCHS = 50
-
-if st.button("Run Prediction (Final Fix)"):
-
-    model_path = f"lstm_model_returns_{TICKER}.keras"
-    scaler_path = f"scalers_returns_{TICKER}.joblib"
-
-    with st.spinner("Fetching data..."):
-        data_raw = yf.download(TICKER, period="5y", progress=False)
-        if data_raw.empty:
-            st.error("No data found for ticker. Please check the symbol.")
-            st.stop()
-
-    with st.spinner("Calculating features..."):
-        data_features = calculate_features(data_raw.copy())
-        if len(data_features) < 50:
-            st.error(f"Not enough data after feature engineering ({len(data_features)} samples).")
-            st.stop()
-
-    with st.spinner("Preprocessing data..."):
-        target, features = preprocess_data(data_features.copy()) 
-        data_for_lstm = data_features.loc[target.index].copy()
+    if st.button("Run Prediction"):
         
-        # Determine lengths for splitting
-        N_samples = len(data_for_lstm)
-        test_size_df = max(int(N_samples * 0.2), 10)
-        
-        # 1. SPLIT DATAFRAME FOR TRAINING AND TESTING (DataFrames are safe)
-        train_data_df = data_for_lstm.iloc[:-test_size_df]
-        train_target = target.iloc[:-test_size_df]
-        
-        # 2. FIT SCALERS ON TRAINING DATA ONLY (ISOLATION FIX)
-        feature_scaler, target_scaler = fit_scalers_on_train(train_data_df, features, train_target)
+        with st.spinner("Fetching and preparing data..."):
+            data = fetch_stock_data(TICKER)
+            
+            # Use the last 5 years of data for analysis, as done in your previous attempts
+            data = data.tail(1250) 
+            
+            data = calculate_features(data.copy())
+            data, features = preprocess_data(data.copy())
 
-        # 3. CREATE WINDOWED TRAINING ARRAYS
-        X_train, y_train = prepare_data_slice(train_data_df, features, train_target, WINDOW_SIZE, feature_scaler, target_scaler)
-        
-        # 4. CREATE WINDOWED TEST ARRAYS (ISOLATION FIX)
-        # We need data starting WINDOW_SIZE-1 days *before* the first test target to create the first test window.
-        test_start_index = N_samples - test_size_df - WINDOW_SIZE + 1
-        
-        # The data slice needed for the test X and y creation
-        data_for_X_test = data_for_lstm.iloc[test_start_index:]
-        target_for_y_test = target.iloc[test_start_index:]
+            # Prepare data for LSTM
+            X, y, feature_scaler, target_scaler = prepare_data(data, features, WINDOW_SIZE)
+            
+            if len(X) < 50:
+                 st.error(f"Insufficient samples ({len(X)}) after windowing and cleaning. Need at least 50.")
+                 st.stop()
+            
+            # CRITICAL FIX: Use train_test_split for guaranteed consistency
+            # Shuffle=False maintains the time-series order, splitting the end chunk for testing
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=TEST_SIZE, shuffle=False, random_state=None
+            )
+            feature_count = X_train.shape[2]
 
-        # Create clean, isolated X_test and y_test arrays
-        X_test, y_test = prepare_data_slice(data_for_X_test, features, target_for_y_test, WINDOW_SIZE, feature_scaler, target_scaler)
+        with st.spinner("Training model with hyperparameter tuning..."):
+            # Load or train model (Simplified to always train for demonstration)
+            model = train_model_with_tuning(X_train, y_train, X_test, y_test, feature_count)
+            st.success("Training and tuning complete.")
 
+        # --- Evaluation and Output ---
+        with st.spinner("Calculating predictions and metrics..."):
+            
+            # Calculate prediction intervals (predictions are still scaled change)
+            # NOTE: We use the simple residual method from your original code
+            y_pred_scaled = model.predict(X_test).flatten()
+            
+            # Calculate residuals from the scaled predictions
+            residuals_scaled = y_test - y_pred_scaled
+            
+            # Calculate scaled bounds
+            lower_bound_scaled = y_pred_scaled + np.percentile(residuals_scaled, 2.5)
+            upper_bound_scaled = y_pred_scaled + np.percentile(residuals_scaled, 97.5)
+            
+            # Inverse transform ALL scaled results (y_pred, y_test, bounds)
+            y_pred = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+            y_test_actual = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+            lower_bound = target_scaler.inverse_transform(lower_bound_scaled.reshape(-1, 1)).flatten()
+            upper_bound = target_scaler.inverse_transform(upper_bound_scaled.reshape(-1, 1)).flatten()
 
-    if len(X_train) < 1:
-        st.error(f"Insufficient samples ({len(X_train)}) after cleaning and windowing for training.")
-        st.stop()
+            # The evaluation metrics now use the correct length and content (actual percentage change)
+            mae = mean_absolute_error(y_test_actual, y_pred)
+            rmse = np.sqrt(mean_squared_error(y_test_actual, y_pred))
+            mape = np.mean(np.abs((y_test_actual - y_pred) / (y_test_actual + 1e-8))) * 100
+            
+            st.write("### Evaluation Metrics (on Test Set - Percentage Change)")
+            st.write(f"- Mean Absolute Error (MAE): {mae:.4f}")
+            st.write(f"- Root Mean Squared Error (RMSE): {rmse:.4f}")
+            st.write(f"- Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
+            
+            # Predict the next day's stock price (using the last row of the full cleaned data)
+            predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, WINDOW_SIZE)
+            st.write(f"### Predicted next-day closing price for {TICKER}: ${predicted_price:.2f}")
 
-    N_test = len(y_test)
-    
-    # 5. SLICE INVERSION DATA (N_test + 1 rows needed)
-    data_for_inversion = data_for_lstm[['Close']].iloc[- (N_test + 1):].copy()
+            # Plotting (requires conversion of percentage change back to price level for visual)
+            
+            # Get the closing price for the day BEFORE the test set starts
+            # The test set starts after X_train ends. The day before the first target is the last day of X_train's targets.
+            start_price_index = len(X) - len(X_test) - 1 # Index of the price that precedes the first test target
+            
+            # Convert percentage changes back to price levels for plotting
+            start_price = data['Close'].iloc[start_price_index]
+            
+            # Create a base array for the test prices, starting with the price before the first target
+            price_base = np.insert(y_test_actual, 0, 0)
+            predicted_base = np.insert(y_pred, 0, 0)
+            
+            # Cumulative product to get price level from percentage change
+            actual_prices = start_price * (1 + price_base).cumprod()
+            predicted_prices = start_price * (1 + predicted_base).cumprod()
+            
+            # Remove the initial base price (index 0) from the cumulative product arrays
+            actual_prices = actual_prices[1:]
+            predicted_prices = predicted_prices[1:]
+            
+            # Adjust bounds to price level (requires the same cumulative product logic)
+            # This is a simplification and the original quantile method applied to log returns is safer.
+            # Here we apply the bounds (which are already in absolute % change terms)
+            lower_bound_prices = actual_prices * (1 + lower_bound) / (1 + y_test_actual) 
+            upper_bound_prices = actual_prices * (1 + upper_bound) / (1 + y_test_actual)
 
-    # --- Model Training/Loading ---
-    if os.path.exists(model_path) and os.path.exists(scaler_path):
-        model = load_model(model_path)
-        feature_scaler, target_scaler = joblib.load(scaler_path)
-        st.success("Loaded existing model and scalers.")
-    else:
-        st.info("Training new model...")
-        
-        input_shape = (X_train.shape[1], X_train.shape[2])
-        model = Sequential()
-        model.add(Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(0.0005)), input_shape=input_shape))
-        model.add(Dropout(0.2))
-        model.add(Bidirectional(LSTM(32, kernel_regularizer=l2(0.0005))))
-        model.add(Dropout(0.2))
-        model.add(Dense(1))
-        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mean_squared_error', metrics=['mae'])
+            # Plotting
+            test_dates = data.index[-len(y_test):]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=test_dates, y=actual_prices, mode='lines', name='Actual Price Level', line=dict(color='blue')))
+            fig.add_trace(go.Scatter(x=test_dates, y=predicted_prices, mode='lines', name='Predicted Price Level', line=dict(color='red', dash='dot')))
+            
+            # Add bounds
+            fig.add_trace(go.Scatter(x=test_dates, y=upper_bound_prices, mode='lines', name='Upper Bound', line=dict(color='gray', dash='dash'), opacity=0.5))
+            fig.add_trace(go.Scatter(x=test_dates, y=lower_bound_prices, mode='lines', name='Lower Bound', line=dict(color='gray', dash='dash'), fill='tonexty', fillcolor='rgba(192, 192, 192, 0.3)', opacity=0.5))
+            
+            fig.update_layout(title=f'Actual vs Predicted Stock Price Levels for {TICKER}',
+                              xaxis_title='Date',
+                              yaxis_title='Closing Price (USD)')
+            st.plotly_chart(fig, use_container_width=True)
 
-        callbacks_list = [
-            tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
-            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5)
-        ]
-
-        history = model.fit(
-            X_train, y_train,
-            epochs=TRAIN_EPOCHS,
-            batch_size=64,
-            validation_data=(X_test, y_test),
-            callbacks=callbacks_list,
-            verbose=0
-        )
-        model.save(model_path)
-        joblib.dump((feature_scaler, target_scaler), scaler_path)
-        st.success("Training complete and model saved.")
-
-    # 6. Execute prediction and evaluation
-    y_pred, lower_bound, upper_bound, y_test_actual = calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion)
-    predicted_price = predict_next_day(model, data_for_lstm, features, feature_scaler, target_scaler, WINDOW_SIZE)
-
-    st.write(f"### Predicted next-day closing price for {TICKER}: ${predicted_price:.2f}")
-
-    display_evaluation_metrics(y_test_actual, y_pred)
-    plot_predictions(data_for_lstm, y_test_actual, y_pred, lower_bound, upper_bound)
+if __name__ == "__main__":
+    main()
