@@ -18,7 +18,7 @@ import streamlit as st
 tf.random.set_seed(42)
 np.random.seed(42)
 
-# Define the path for saving the model and scalers
+# Define constants
 MODEL_DIR = "models"
 MODEL_FILENAME = "lstm_stock_predictor.keras"
 FEATURE_SCALER_FILENAME = "feature_scaler.joblib"
@@ -29,16 +29,14 @@ WINDOW_SIZE = 15 # Sequence length for LSTM input
 if not os.path.exists(MODEL_DIR):
     os.makedirs(MODEL_DIR)
 
-# --- 1. Data Retrieval Functions (Modified for Full History) ---
+# --- 1. Data Retrieval Functions ---
 
 @st.cache_data(show_spinner="Fetching complete historical stock data...")
 def fetch_stock_data(ticker):
     """Function to fetch the complete historical stock data."""
     try:
-        end_date = datetime.date.today()
-        
-        # REMOVED START DATE: Passing None for start date fetches max history
-        stock_data = yf.download(ticker, start=None, end=end_date, progress=False)
+        # Using period='max' which is generally more robust for full history
+        stock_data = yf.download(ticker, period='max', progress=False) 
 
         if stock_data.empty:
             raise ValueError("No data found. Please check the ticker symbol.")
@@ -75,12 +73,24 @@ def calculate_macd(data, short_window=12, long_window=26, signal_window=9):
     data['MACD_Signal'] = data['MACD'].ewm(span=signal_window, adjust=False).mean()
     return data
 
+# --- 3. Feature Calculation (Modified for Robustness) ---
+
 def calculate_features(data):
     """Calculates all technical indicators and lagged features."""
+    
+    data_length = len(data)
+    
+    # Calculate Core Indicators
     data['EMA_9'] = calculate_ema(data, 9)
     data['EMA_21'] = calculate_ema(data, 21)
     data['EMA_50'] = calculate_ema(data, 50)
-    data['EMA_200'] = calculate_ema(data, 200) 
+    
+    # Conditional EMA_200 calculation to prevent data loss on new stocks
+    if data_length >= 250:
+        data['EMA_200'] = calculate_ema(data, 200)
+    else:
+        data['EMA_200'] = np.nan 
+
     data['RSI'] = calculate_rsi(data)
     data = calculate_bollinger_bands(data)
     data = calculate_macd(data)
@@ -98,20 +108,33 @@ def calculate_features(data):
         data[f'Lag_Bollinger_Upper_{lag}'] = data['Bollinger_Upper'].shift(lag)
         data[f'Lag_Bollinger_Lower_{lag}'] = data['Bollinger_Lower'].shift(lag)
 
-    # Drop rows with NaN values resulting from indicator/lag calculation
-    data.dropna(inplace=True)
+    # Calculate the minimum required non-NaN count for a row to be kept
+    # This is (Total columns - max 2 missing features) to handle EMA_200 missing or random NaN
+    # We use data.shape[1] AFTER all columns are created.
+    required_non_nan = data.shape[1] - 5 # Allow up to 5 NaN values (e.g., EMA_200 + initial price changes)
+    
+    # Drop rows based on the threshold (thresh)
+    data.dropna(axis=0, how='any', thresh=required_non_nan, inplace=True)
+    
     return data
 
-# --- 3. Preprocessing and Data Preparation Functions (Unchanged) ---
+# --- 4. Preprocessing and Data Preparation Functions ---
 
 def preprocess_data(data):
     """Adds the target variable and defines the feature list."""
     data['Target'] = data['Close'].shift(-1)
-    data.dropna(subset=['Target'], inplace=True) # Drop the very last row which now has NaN target
     
-    # Define the complete feature list
-    features = ['Open', 'High', 'Low', 'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
-                'RSI', 'Bollinger_Upper', 'Bollinger_Lower', 'MACD', 'MACD_Signal', 'Volume_Change', 'Price_Change']
+    # Drop the very last row which now has NaN target
+    data.dropna(subset=['Target'], inplace=True) 
+    
+    # Define the base feature list
+    features = ['Open', 'High', 'Low', 'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 
+                'RSI', 'Bollinger_Upper', 'Bollinger_Lower', 'MACD', 'MACD_Signal', 
+                'Volume_Change', 'Price_Change']
+    
+    # Dynamically include EMA_200 only if it exists and has non-NaN values
+    if 'EMA_200' in data.columns and not data['EMA_200'].isnull().all():
+        features.append('EMA_200')
     
     # Add all lagged features
     for lag in range(1, 6):
@@ -138,7 +161,7 @@ def prepare_data(data, features, window_size):
 
     return X, y, feature_scaler, target_scaler
 
-# --- 4. Model Training and Saving Functions (Unchanged) ---
+# --- 5. Model Training and Saving Functions ---
 
 @st.cache_resource(show_spinner="Training LSTM model (this might take a few minutes)...")
 def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batch_size=32, epochs=100):
@@ -187,7 +210,7 @@ def save_scalers(feature_scaler, target_scaler):
     joblib.dump(feature_scaler, os.path.join(MODEL_DIR, FEATURE_SCALER_FILENAME))
     joblib.dump(target_scaler, os.path.join(MODEL_DIR, TARGET_SCALER_FILENAME))
 
-# --- 5. Prediction and Evaluation Functions (Unchanged) ---
+# --- 6. Prediction and Evaluation Functions ---
 
 def predict_next_day(model, data, features, feature_scaler, target_scaler, window_size):
     """Predicts the next day's stock price."""
@@ -219,7 +242,7 @@ def calculate_prediction_intervals(model, X_test, y_test, target_scaler, alpha=0
     
     return y_pred, lower_bound, upper_bound
 
-# --- 6. Streamlit Main Function (Modified) ---
+# --- 7. Streamlit Main Function (Finalized) ---
 
 def main():
     st.set_page_config(page_title="LSTM Stock Price Predictor", layout="wide")
@@ -231,7 +254,6 @@ def main():
     with col1:
         ticker = st.text_input("Enter the stock ticker (e.g., AAPL):", "AAPL").upper()
         
-        # Removed the 'data_period_years' slider
         st.info("Model will be trained on **complete historical data** available for this ticker.")
         
         test_size = st.slider("Test Set Size (%)", 5, 40, 20) / 100
@@ -240,20 +262,25 @@ def main():
             
             # --- Data Fetching and Preparation ---
             
-            # Fetch full historical data
             data = fetch_stock_data(ticker)
             
             if data is None:
                 return
+            
+            # --- Robust Data Validation (Fix 1) ---
+            if data[['Open', 'Close', 'Volume']].isnull().all(axis=0).any():
+                st.error("Error: Critical columns (Open, Close, or Volume) are missing or entirely NaN in the raw data. Cannot proceed.")
+                return
+            data.dropna(subset=['Close'], inplace=True) 
 
             st.success(f"Successfully fetched {len(data)} trading days of data for {ticker}.")
 
-            # 1. Calculate features (requires long history)
+            # 1. Calculate features 
             data = calculate_features(data)
             
-            # 💡 FIX from previous error: Check if the DataFrame is empty after cleaning
+            # 💡 CRITICAL CHECK: Ensure the DataFrame is not empty after feature calculation
             if data.empty:
-                st.error("Error: The DataFrame is empty after calculating features and removing NaN values. Try a different ticker or check for data issues.")
+                st.error("Error: The DataFrame is empty after calculating features and removing NaN values. Try a different ticker or check for data integrity issues in the fetched data.")
                 return
 
             # 2. Preprocess data and define feature list
@@ -264,11 +291,11 @@ def main():
                 st.error(f"Error: Not enough data points ({len(data)}) after feature engineering. Need at least {WINDOW_SIZE + 1} for a window size of {WINDOW_SIZE}.")
                 return
 
-            # 4. Prepare data for LSTM (scaling and sequence creation)
+            # 4. Prepare data for LSTM 
             X, y, feature_scaler, target_scaler = prepare_data(data, features, WINDOW_SIZE)
             save_scalers(feature_scaler, target_scaler) 
 
-            # 5. Split the data - shuffle=False for time series integrity
+            # 5. Split the data
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=test_size, shuffle=False 
             )
@@ -321,10 +348,7 @@ def main():
             
             fig = go.Figure()
             
-            # Actual Prices
             fig.add_trace(go.Scatter(x=plot_data['dates'], y=plot_data['y_test_actual'], mode='lines', name='Actual Prices', line=dict(color='blue', width=2)))
-            
-            # Predicted Prices
             fig.add_trace(go.Scatter(x=plot_data['dates'], y=plot_data['y_pred'], mode='lines', name='Predicted Prices', line=dict(color='red', width=1)))
             
             # Prediction Interval
