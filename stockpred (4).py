@@ -84,30 +84,34 @@ def preprocess_data(data):
     data = data.loc[target.index] 
     return target, features
 
-# --- Data Preparation Functions (modified) ---
+# --- Data Preparation Functions (modified for train-only fit) ---
 
-def fit_scalers(data_df, features, target_series):
+def fit_scalers_on_train(data_df, features, target_series):
     feature_scaler = MinMaxScaler()
     target_scaler = MinMaxScaler()
     feature_scaler.fit(data_df[features])
     target_scaler.fit(target_series.values.reshape(-1, 1))
     return feature_scaler, target_scaler
 
-def prepare_data(data_df, features, target_series, window_size, feature_scaler, target_scaler):
+def prepare_data_slice(data_df, features, target_series, window_size, feature_scaler, target_scaler):
     # Only scale and window the provided (sliced) data
     scaled_features = feature_scaler.transform(data_df[features])
+    
+    # Check if slice is big enough for at least one window
+    if len(scaled_features) < window_size:
+        return np.array([]), np.array([])
+        
     X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
     y_raw = target_series.values[window_size:]
     y = target_scaler.transform(y_raw.reshape(-1, 1)).flatten()
     return X, y
 
-# --- Evaluation Functions ---
+# --- Evaluation Functions (unchanged) ---
 
 def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion):
     y_pred_scaled = np.array(model.predict(X_test, verbose=0)).flatten()
     y_pred_log_return = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
     
-    # Slicing P_t and P_t+1 (Data for inversion has length N_test + 1)
     close_t = data_for_inversion['Close'].values[:-1]
     y_test_actual = data_for_inversion['Close'].values[1:]
     
@@ -199,15 +203,15 @@ if st.button("Run Prediction (Final Fix)"):
         N_samples = len(data_for_lstm)
         test_size_df = max(int(N_samples * 0.2), 10)
         
-        # 1. SPLIT DATAFRAME FOR TRAINING
+        # 1. SPLIT DATAFRAME FOR TRAINING AND TESTING (DataFrames are safe)
         train_data_df = data_for_lstm.iloc[:-test_size_df]
         train_target = target.iloc[:-test_size_df]
         
-        # 2. FIT SCALERS ON FULL DATASET (OR TRAIN SET IF PREFERRED, here we use the full data for consistency)
-        feature_scaler, target_scaler = fit_scalers(data_for_lstm, features, target)
+        # 2. FIT SCALERS ON TRAINING DATA ONLY (ISOLATION FIX)
+        feature_scaler, target_scaler = fit_scalers_on_train(train_data_df, features, train_target)
 
         # 3. CREATE WINDOWED TRAINING ARRAYS
-        X_train, y_train = prepare_data(train_data_df, features, train_target, WINDOW_SIZE, feature_scaler, target_scaler)
+        X_train, y_train = prepare_data_slice(train_data_df, features, train_target, WINDOW_SIZE, feature_scaler, target_scaler)
         
         # 4. CREATE WINDOWED TEST ARRAYS (ISOLATION FIX)
         # We need data starting WINDOW_SIZE-1 days *before* the first test target to create the first test window.
@@ -218,7 +222,8 @@ if st.button("Run Prediction (Final Fix)"):
         target_for_y_test = target.iloc[test_start_index:]
 
         # Create clean, isolated X_test and y_test arrays
-        X_test, y_test = prepare_data(data_for_X_test, features, target_for_y_test, WINDOW_SIZE, feature_scaler, target_scaler)
+        X_test, y_test = prepare_data_slice(data_for_X_test, features, target_for_y_test, WINDOW_SIZE, feature_scaler, target_scaler)
+
 
     if len(X_train) < 1:
         st.error(f"Insufficient samples ({len(X_train)}) after cleaning and windowing for training.")
@@ -227,7 +232,6 @@ if st.button("Run Prediction (Final Fix)"):
     N_test = len(y_test)
     
     # 5. SLICE INVERSION DATA (N_test + 1 rows needed)
-    # This must be the last N_test + 1 rows of the 'Close' price from the data_for_lstm (aligned data).
     data_for_inversion = data_for_lstm[['Close']].iloc[- (N_test + 1):].copy()
 
     # --- Model Training/Loading ---
