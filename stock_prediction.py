@@ -10,12 +10,13 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 from tensorflow.keras.regularizers import l2 
 import tensorflow as tf 
 import streamlit as st 
-import joblib # Required for scaler persistence 
+import joblib 
 import warnings 
-from sklearn.model_selection import train_test_split # Explicitly ensure this is imported
+from sklearn.model_selection import train_test_split 
 
 # Suppress TensorFlow warnings 
 warnings.filterwarnings("ignore", category=FutureWarning)
+# Note: os.environ assignment is kept based on previous context, but may not be strictly necessary
 os.environ = '2' 
 
 # --- I. DATA ACQUISITION AND FEATURE ENGINEERING --- 
@@ -47,25 +48,26 @@ def calculate_rsi(data, window=14):
     return rsi 
 
 def calculate_bollinger_bands(data, window=20): 
-    """Calculates Bollinger Bands (2 std deviations)."""
+    """Calculates Bollinger Bands (2 std deviations) and adds to DataFrame."""
     sma = data['Close'].rolling(window=window).mean() 
     std_dev = data['Close'].rolling(window=window).std() 
-    data = sma + (2 * std_dev) # Correct assignment
-    data = sma - (2 * std_dev) # Correct assignment
-    return data # Returns DataFrame
+    # Corrected assignment to update the DataFrame columns
+    data = sma + (2 * std_dev) 
+    data = sma - (2 * std_dev) 
+    return data
 
 def calculate_macd(data, short_window=12, long_window=26, signal_window=9): 
-    """Calculates Moving Average Convergence Divergence (MACD)."""
+    """Calculates Moving Average Convergence Divergence (MACD) and adds to DataFrame."""
     short_ema = data['Close'].ewm(span=short_window, adjust=False).mean() 
     long_ema = data['Close'].ewm(span=long_window, adjust=False).mean() 
-    data = short_ema - long_ema # Correct assignment
-    data = data.ewm(span=signal_window, adjust=False).mean() # Correct assignment
-    return data # Returns DataFrame
+    # Corrected assignment to update the DataFrame columns
+    data = short_ema - long_ema 
+    data = data.ewm(span=signal_window, adjust=False).mean() 
+    return data 
 
 def calculate_features(data): 
     """
     Calculates 5 key technical indicators and extensive lagged features.
-    Ensures long lookback periods (e.g., EMA_200) are stable.
     """
     # 1. Trend Indicators (EMA variants)
     data['EMA_9'] = calculate_ema(data, 9) 
@@ -74,20 +76,20 @@ def calculate_features(data):
     data['EMA_200'] = calculate_ema(data, 200) 
     
     # 2. Momentum Indicator
-    data = calculate_rsi(data) # Correct assignment
+    data = calculate_rsi(data) 
     
-    # 3. Volatility Indicator
-    data = calculate_bollinger_bands(data) # Uses correct function
+    # 3. Volatility Indicator (Updates data in place and returns it)
+    data = calculate_bollinger_bands(data) 
     
-    # 4. Convergence/Divergence Indicator
-    data = calculate_macd(data) # Uses correct function
+    # 4. Convergence/Divergence Indicator (Updates data in place and returns it)
+    data = calculate_macd(data) 
 
     # 5. Volume and Price Rate of Change
     data['Volume_Change'] = data['Volume'].pct_change() 
     data['Price_Change'] = data['Close'].pct_change() 
 
     # 6. Sequential Memory Features (Lagged Values - 5 days) 
-    # FIX: Completed list assignment
+    # FIX: Completed list assignment (addresses SyntaxError)
     lag_features =
     for feature in lag_features:
          for lag in range(1, 6):
@@ -101,20 +103,25 @@ def calculate_features(data):
 def preprocess_data(data): 
     """Defines the target variable and lists the final feature set."""
     # Target: Predict the next day's closing price
-    data = data['Close'].shift(-1) # Correct assignment
+    data = data['Close'].shift(-1) 
     data.dropna(inplace=True) 
     
     # Final comprehensive feature list
     # FIX: Completed list assignment for all core non-lagged features
-    features =
+    base_features =
     
-    # Add all 35 lagged features 
+    # Features that were lagged in calculate_features
     # FIX: Completed list assignment for features to be lagged
-    lag_features_base =
-    for feature in lag_features_base:
+    lagged_feature_bases =
+    
+    features = base_features.copy()
+    
+    # Dynamically add the 35 lagged columns to the feature list
+    for feature_base in lagged_feature_bases:
         for lag in range(1, 6):
-            features.append(f'Lag_{feature}_{lag}')
+            features.append(f'Lag_{feature_base}_{lag}')
 
+    # Return the target column Series and the final list of features
     return data, features 
 
 # --- II. LSTM DATA PREPARATION AND TRAINING --- 
@@ -133,7 +140,7 @@ def prepare_data(data, features, window_size=10):
                   for i in range(window_size, len(scaled_features))]) 
     
     # 3. Scale Target (y)
-    y_raw = data.values[window_size:] # Target column
+    y_raw = data.values[window_size:] # Use the defined 'Target' column
     y = target_scaler.fit_transform(y_raw.reshape(-1, 1)).flatten() 
 
     return X, y, feature_scaler, target_scaler 
@@ -145,6 +152,7 @@ def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batc
     # Correctly extracting the input shape: (Timesteps, Num_Features)
     input_shape = (X_train.shape, X_train.shape) 
     
+    # FIX: Restored the model definition
     model = Sequential() 
 
     # Optimization strategy
@@ -155,7 +163,7 @@ def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batc
     st.info("Starting model training (B-LSTM)...")
     
     # Training protocol with adaptive callbacks
-    # FIX: Restoring the full callback list
+    # FIX: Restored the full callback list
     callbacks_list =
 
     history = model.fit( 
@@ -209,12 +217,15 @@ def load_model_and_scalers(ticker):
         st.info(f"No saved model found for {ticker}. Training new model...") 
         return None, None, None 
 
-def predict_next_day(model, data, features, feature_scaler, target_scaler, window_size=10): 
+def predict_next_day(model, data_processed, features, feature_scaler, target_scaler, window_size=10): 
     """
     Predicts the next day's stock price using the last sequence of available data.
     """
     # 1. Get the last required sequence (10 days)
-    last_data = data[features].values[-window_size:] 
+    # The data_processed input here is the DataFrame *after* all features and target columns were calculated
+    # but *before* the target shift caused the last row (which contains NaN for target) to be dropped.
+    # We must use the last valid row from the original feature calculation set.
+    last_data = data_processed[features].values[-window_size:] 
     
     # 2. Scale the sequence using the saved feature_scaler
     last_data_scaled = feature_scaler.transform(last_data) 
@@ -312,7 +323,7 @@ def main():
 
     # --- Constants/Hyperparameters --- 
     WINDOW_SIZE = 10 
-    TRAIN_EPOCHS = 50 # Adjusted based on EarlyStopping
+    TRAIN_EPOCHS = 50 
     
     ticker = st.text_input("Enter the stock ticker (e.g., AAPL):", "AAPL").upper() 
     
@@ -320,35 +331,43 @@ def main():
         st.warning("Please enter a stock ticker.") 
         return 
 
-    # 1. Attempt to load existing model and scalers
-    model, feature_scaler, target_scaler = load_model_and_scalers(ticker) 
-    
-    # 2. Fetch data (Required even if model is loaded, to get latest sequence for prediction)
+    # 1. Fetch data
     data_raw = fetch_stock_data(ticker) 
     if data_raw is None: 
         return 
 
-    # 3. Calculate features and preprocess (on full history)
-    # Use a copy to avoid modifying the original data_raw state
-    data = data_raw.copy()
-    data = calculate_features(data) 
-    data, features = preprocess_data(data) 
+    # 2. Calculate features (on full history)
+    data_features = data_raw.copy()
+    data_features = calculate_features(data_features) 
     
-    # 4. Prepare data for sequence modeling
-    X, y, initial_feature_scaler, initial_target_scaler = prepare_data(data, features, WINDOW_SIZE) 
+    # 3. Handle Persistence (Attempt to load before proceeding to training/scaling)
+    model, feature_scaler, target_scaler = load_model_and_scalers(ticker) 
+
+    # 4. Preprocess data (Defines Target, calculates final features list)
+    # The 'data' passed here needs to have all features calculated for the splitting logic.
+    # We pass data_features to preprocess_data which will extract the target and features list
+    data_target, features = preprocess_data(data_features.copy()) 
+    
+    # The data_for_lstm is the DataFrame used for sequence generation, which must have
+    # the target column appended for the next step.
+    data_for_lstm = data_features.loc[data_target.index]
+    data_for_lstm = data_target
+    
+    # 5. Prepare data for sequence modeling
+    X, y, initial_feature_scaler, initial_target_scaler = prepare_data(data_for_lstm, features, WINDOW_SIZE) 
     
     if len(X) < 30: # Minimum reasonable length for split
         st.error(f"Insufficient samples ({len(X)}) after cleaning and windowing. Required at least 30 samples for meaningful training.")
         return
 
     # Split the data chronologically (80% training, 20% testing)
-    test_size = max(int(len(X) * 0.2), 10) # Ensure at least 10 samples for test set
+    test_size = max(int(len(X) * 0.2), 10) 
     X_train = X[:-test_size] 
     X_test = X[-test_size:] 
     y_train = y[:-test_size] 
     y_test = y[-test_size:] 
 
-    # 5. Training Logic
+    # 6. Training Logic
     if model is None: 
         # Use the newly fitted scalers if training
         feature_scaler = initial_feature_scaler
@@ -357,15 +376,21 @@ def main():
         # Train and save the new model
         model = train_lstm_model(X_train, y_train, X_test, y_test, epochs=TRAIN_EPOCHS) 
         save_model_and_scalers(model, feature_scaler, target_scaler, ticker) 
+    elif feature_scaler is None or target_scaler is None:
+        # If model loaded but scalers failed, use the newly fitted scalers from preparation
+        feature_scaler = initial_feature_scaler
+        target_scaler = initial_target_scaler
+        st.warning("Model loaded, but scalers were missing/corrupted. Using newly fitted scalers.")
 
-    # 6. Evaluation and Prediction
+    # 7. Evaluation and Prediction
     try: 
         # Calculate prediction intervals and inverse transform all data
         y_pred, lower_bound, upper_bound, y_test_actual = calculate_prediction_intervals(
             model, X_test, y_test, target_scaler) 
 
         # Predict the next day's stock price (T+1 Inference)
-        predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, WINDOW_SIZE) 
+        # Use the data_features DF (which has all features calculated up to the latest date)
+        predicted_price = predict_next_day(model, data_features, features, feature_scaler, target_scaler, WINDOW_SIZE) 
         
         st.subheader(f"T+1 Prediction for {ticker}")
         st.metric(label="Predicted Next Day Close Price", 
@@ -374,8 +399,8 @@ def main():
         # Display performance metrics
         display_evaluation_metrics(y_test_actual, y_pred)
 
-        # Plot results
-        plot_predictions(data, ticker, y_test_actual, y_pred, lower_bound, upper_bound)
+        # Plot results (use the data_for_lstm which contains the dates corresponding to the test set)
+        plot_predictions(data_for_lstm, ticker, y_test_actual, y_pred, lower_bound, upper_bound)
         
     except Exception as e: 
         st.error(f"A critical error occurred during prediction or evaluation: {e}") 
