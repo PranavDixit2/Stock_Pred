@@ -8,7 +8,6 @@ import os
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.decomposition import PCA # <-- NEW: For Feature Reduction
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, GRU, BatchNormalization
@@ -19,7 +18,7 @@ import logging
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
-# --- Feature & Data Functions ---
+# --- Feature & Data Functions (Unchanged) ---
 
 def fetch_stock_data(ticker):
     data_raw = yf.download(ticker)
@@ -74,11 +73,9 @@ def calculate_features(data):
     return data
 
 def preprocess_data(data):
-    # Target is the next day's percentage change (t+1)
     data['Target'] = data['Close'].pct_change().shift(-1)
     data.dropna(inplace=True)
     
-    # Define features based on the column generation in calculate_features
     features = [col for col in data.columns if col not in ['Target', 'Adj Close']]
     return data, features
 
@@ -106,7 +103,7 @@ class LSTMHyperModel(HyperModel):
         
         model.add(Dense(1)) 
         
-        # IMPROVEMENT: Using Huber Loss to penalize outliers less
+        # Using Huber Loss to penalize outliers less
         model.compile(optimizer=tf.keras.optimizers.Adam(hp.Float('learning_rate', 1e-4, 1e-3, sampling='LOG')),
                       loss=tf.keras.losses.Huber(delta=1.0), metrics=['mae'])
         return model
@@ -118,7 +115,7 @@ def train_model_with_tuning(X_train, y_train, X_test, y_test, feature_count):
                          max_trials=10, 
                          executions_per_trial=1,
                          directory='kt_dir',
-                         project_name='stock_pred_huber') # New project name
+                         project_name='stock_pred_no_pca') # Updated project name
     
     callbacks_list = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)]
 
@@ -127,39 +124,33 @@ def train_model_with_tuning(X_train, y_train, X_test, y_test, feature_count):
     best_model = tuner.get_best_models(num_models=1)[0]
     return best_model
 
-# --- Data Preparation & Prediction Functions ---
+# --- Data Preparation & Prediction Functions (PCA removed) ---
 
-def prepare_data(data, features, window_size=20, pca_variance=0.85): # Added PCA variance threshold
+def prepare_data(data, features, window_size=20): 
     feature_scaler = MinMaxScaler()
     target_scaler = MinMaxScaler()
 
+    # NO PCA: Use all features
     scaled_features = feature_scaler.fit_transform(data[features])
     
-    # NEW: Apply PCA for Dimensionality Reduction 
-    pca = PCA(n_components=pca_variance) 
-    pca.fit(scaled_features)
-    scaled_features_reduced = pca.transform(scaled_features)
+    # Feature count is the actual number of features
     
-    st.write(f"Feature count reduced from **{len(features)}** to **{scaled_features_reduced.shape[1]}** (retaining {pca_variance*100:.0f}% variance).")
-
     # Create time series windows (X)
-    X = np.array([scaled_features_reduced[i-window_size:i] for i in range(window_size, len(scaled_features_reduced))])
+    X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
     
     # Target variable (y)
     y_raw = data['Target'].values[window_size:]
     y = target_scaler.fit_transform(y_raw.reshape(-1, 1)).flatten()
     
-    # Return the PCA object along with scalers
-    return X, y, feature_scaler, target_scaler, pca
+    # Return features count for model building
+    return X, y, feature_scaler, target_scaler, len(features) 
 
-def predict_next_day(model, data, features, feature_scaler, target_scaler, pca, window_size=20): # Added PCA object
+def predict_next_day(model, data, features, feature_scaler, target_scaler, window_size=20):
     last_data = data[features].values[-window_size:]
     last_data_scaled = feature_scaler.transform(last_data)
     
-    # NEW: Transform feature data using the fitted PCA object
-    last_data_scaled_reduced = pca.transform(last_data_scaled) 
-    
-    last_data_reshaped = last_data_scaled_reduced.reshape((1, window_size, last_data_scaled_reduced.shape[1]))
+    # NO PCA: Reshape the full scaled data 
+    last_data_reshaped = last_data_scaled.reshape((1, window_size, len(features)))
 
     predicted_change_scaled = model.predict(last_data_reshaped, verbose=0)[0][0]
     
@@ -170,26 +161,7 @@ def predict_next_day(model, data, features, feature_scaler, target_scaler, pca, 
     
     return float(predicted_price)
 
-# --- Evaluation Functions (Metrics function uses safe arrays) ---
-
-def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion):
-    y_pred_scaled = np.array(model.predict(X_test, verbose=0)).flatten()
-    y_pred_log_return = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
-    
-    close_t = data_for_inversion['Close'].values[:-1]
-    y_test_actual = data_for_inversion['Close'].values[1:]
-    
-    y_pred_actual = close_t * np.exp(y_pred_log_return) 
-
-    residuals = y_test_actual - y_pred_actual
-    std_dev = np.std(residuals)
-    z_score = 1.96
-    margin_of_error = z_score * std_dev
-    
-    lower_bound = (y_pred_actual - margin_of_error).flatten()
-    upper_bound = (y_pred_actual + margin_of_error).flatten()
-    
-    return y_pred_actual.flatten(), lower_bound, upper_bound, y_test_actual.flatten()
+# --- Evaluation Functions (Metrics function is safe) ---
 
 def display_evaluation_metrics(y_test_actual, y_pred):
     y_true_safe = np.array(y_test_actual)
@@ -209,30 +181,29 @@ def display_evaluation_metrics(y_test_actual, y_pred):
     st.write(f"- Mean Absolute Error (MAE): **{mae:.4f}**")
     st.write(f"- Root Mean Squared Error (RMSE): {rmse:.4f}")
     st.write(f"- Mean Absolute Percentage Error (MAPE): {mape:.2f}% (Ignored due to near-zero targets)")
-    
+
 # --- Streamlit Application ---
 
 def main():
-    st.title("Stock Price Prediction with B-GRU LSTM (PCA & Huber Loss)")
-    st.write("Enhanced training with feature reduction and improved outlier handling.")
+    st.title("Stock Price Prediction with B-GRU LSTM (Full Features & Huber Loss)")
+    st.write("Optimized for performance with enhanced hyperparameter tuning and robust loss function.")
 
     TICKER = st.text_input("Enter the stock ticker (e.g., AAPL):", "AAPL").upper()
     WINDOW_SIZE = st.sidebar.slider("LSTM Lookback Window", min_value=10, max_value=30, value=20)
     TEST_SIZE = st.sidebar.slider("Test Set Size (%)", min_value=10, max_value=30, value=20) / 100
-    PCA_VARIANCE = st.sidebar.slider("PCA Variance Threshold", min_value=0.70, max_value=0.95, value=0.85, step=0.05)
 
     if st.button("Run Prediction"):
         
         with st.spinner("Fetching and preparing data..."):
             data = fetch_stock_data(TICKER)
             
-            data = data.tail(1250) # Use the last 5 years of data
+            data = data.tail(1250)
             
             data = calculate_features(data.copy())
             data, features = preprocess_data(data.copy())
 
-            # Prepare data for LSTM (now includes PCA)
-            X, y, feature_scaler, target_scaler, pca = prepare_data(data, features, WINDOW_SIZE, PCA_VARIANCE)
+            # Prepare data for LSTM (PCA removed)
+            X, y, feature_scaler, target_scaler, feature_count = prepare_data(data, features, WINDOW_SIZE)
             
             if len(X) < 50:
                  st.error(f"Insufficient samples ({len(X)}) after windowing and cleaning. Need at least 50.")
@@ -241,9 +212,9 @@ def main():
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=TEST_SIZE, shuffle=False, random_state=None
             )
-            feature_count = X_train.shape[2] # Use the reduced feature count
 
         with st.spinner("Training model with hyperparameter tuning..."):
+            # feature_count is the full number of features
             model = train_model_with_tuning(X_train, y_train, X_test, y_test, feature_count)
             st.success("Training and tuning complete.")
 
@@ -256,24 +227,23 @@ def main():
             lower_bound_scaled = y_pred_scaled + np.percentile(residuals_scaled, 2.5)
             upper_bound_scaled = y_pred_scaled + np.percentile(residuals_scaled, 97.5)
             
-            # Inverse transform ALL scaled results
             y_pred = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
             y_test_actual = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
             lower_bound = target_scaler.inverse_transform(lower_bound_scaled.reshape(-1, 1)).flatten()
             upper_bound = target_scaler.inverse_transform(upper_bound_scaled.reshape(-1, 1)).flatten()
 
-            # The evaluation metrics now use the correct length and content (actual percentage change)
             display_evaluation_metrics(y_test_actual, y_pred)
             
-            predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, pca, WINDOW_SIZE)
+            # Predict next day (PCA removed)
+            predicted_price = predict_next_day(model, data, features, feature_scaler, target_scaler, WINDOW_SIZE)
             st.write(f"### Predicted next-day closing price for {TICKER}: **${predicted_price:.2f}**")
 
-            # --- Plotting Price Levels ---
+            # --- Plotting Price Levels (unchanged) ---
             N_test = len(y_test)
             
             start_price_index = len(X) - len(X_test) - 1 
             start_price = data['Close'].iloc[start_price_index]
-            start_price_scalar = float(start_price) # Convert to scalar float
+            start_price_scalar = float(start_price)
             
             price_base = np.insert(y_test_actual, 0, 0.0)
             predicted_base = np.insert(y_pred, 0, 0.0)
@@ -293,7 +263,6 @@ def main():
             fig.add_trace(go.Scatter(x=test_dates, y=actual_prices, mode='lines', name='Actual Price Level', line=dict(color='blue')))
             fig.add_trace(go.Scatter(x=test_dates, y=predicted_prices, mode='lines', name='Predicted Price Level', line=dict(color='red', dash='dot')))
             
-            # Add bounds
             fig.add_trace(go.Scatter(x=test_dates, y=upper_bound_prices, mode='lines', name='Upper Bound', line=dict(color='gray', dash='dash'), opacity=0.5))
             fig.add_trace(go.Scatter(x=test_dates, y=lower_bound_prices, mode='lines', name='Lower Bound', line=dict(color='gray', dash='dash'), fill='tonexty', fillcolor='rgba(192, 192, 192, 0.3)', opacity=0.5))
             
