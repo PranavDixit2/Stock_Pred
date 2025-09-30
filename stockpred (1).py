@@ -220,7 +220,7 @@ if st.button("Run Prediction"):
         history = model.fit(
             X_train, y_train,
             epochs=TRAIN_EPOCHS,
-            batch_size=64,
+            batch_size=32,
             validation_data=(X_test, y_test),
             callbacks=callbacks_list,
             verbose=0
