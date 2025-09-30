@@ -144,8 +144,7 @@ def predict_next_day(model, data, features, feature_scaler, target_scaler, windo
     last_data_scaled = feature_scaler.transform(last_data)
     last_data_reshaped = last_data_scaled.reshape((1, window_size, len(features)))
 
-    # Predict the scaled percentage change
-    predicted_change_scaled = model.predict(last_data_reshaped)[0][0]
+    predicted_change_scaled = model.predict(last_data_reshaped, verbose=0)[0][0] # Access the scalar value
     
     # Inverse transform to get the actual percentage change
     predicted_change = target_scaler.inverse_transform([[predicted_change_scaled]])[0][0]
@@ -153,8 +152,10 @@ def predict_next_day(model, data, features, feature_scaler, target_scaler, windo
     # Calculate the predicted price
     current_price = data['Close'].values[-1]
     predicted_price = current_price * (1 + predicted_change)
-    return predicted_price
-
+    
+    # FIX: Ensure the final result is a standard Python float
+    return float(predicted_price)
+    
 # --- Streamlit Application ---
 
 def main():
