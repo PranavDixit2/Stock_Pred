@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import datetime
-import joblib # For saving and loading the scaler objects
+import joblib 
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error
@@ -23,34 +23,32 @@ MODEL_DIR = "models"
 MODEL_FILENAME = "lstm_stock_predictor.keras"
 FEATURE_SCALER_FILENAME = "feature_scaler.joblib"
 TARGET_SCALER_FILENAME = "target_scaler.joblib"
-WINDOW_SIZE = 15 # Increased window size for better LSTM performance
-LOOKBACK_DAYS = 365 * 3 # Fetch 3 years of data to ensure indicators are calculated
+WINDOW_SIZE = 15 # Sequence length for LSTM input
 
 # Create the model directory if it doesn't exist
 if not os.path.exists(MODEL_DIR):
     os.makedirs(MODEL_DIR)
 
-# --- 1. Data Retrieval Functions ---
+# --- 1. Data Retrieval Functions (Modified for Full History) ---
 
-@st.cache_data(show_spinner="Fetching stock data...")
-def fetch_stock_data(ticker, lookback_days):
-    """Function to fetch stock data for a specified lookback period."""
+@st.cache_data(show_spinner="Fetching complete historical stock data...")
+def fetch_stock_data(ticker):
+    """Function to fetch the complete historical stock data."""
     try:
         end_date = datetime.date.today()
-        start_date = end_date - datetime.timedelta(days=lookback_days) 
         
-        # Use a longer period to ensure all EMAs/indicators are calculated
-        stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+        # REMOVED START DATE: Passing None for start date fetches max history
+        stock_data = yf.download(ticker, start=None, end=end_date, progress=False)
 
         if stock_data.empty:
-            raise ValueError("No data found. Please check the ticker symbol or the time range.")
+            raise ValueError("No data found. Please check the ticker symbol.")
             
         return stock_data
     except Exception as e:
         st.error(f"Error fetching stock data for {ticker}: {e}")
         return None
 
-# --- 2. Technical Indicator Functions ---
+# --- 2. Technical Indicator Functions (Unchanged) ---
 
 def calculate_ema(data, span):
     return data['Close'].ewm(span=span, adjust=False).mean()
@@ -82,7 +80,7 @@ def calculate_features(data):
     data['EMA_9'] = calculate_ema(data, 9)
     data['EMA_21'] = calculate_ema(data, 21)
     data['EMA_50'] = calculate_ema(data, 50)
-    data['EMA_200'] = calculate_ema(data, 200) # Requires a long history!
+    data['EMA_200'] = calculate_ema(data, 200) 
     data['RSI'] = calculate_rsi(data)
     data = calculate_bollinger_bands(data)
     data = calculate_macd(data)
@@ -101,11 +99,10 @@ def calculate_features(data):
         data[f'Lag_Bollinger_Lower_{lag}'] = data['Bollinger_Lower'].shift(lag)
 
     # Drop rows with NaN values resulting from indicator/lag calculation
-    # This keeps only the data points that have all required features
     data.dropna(inplace=True)
     return data
 
-# --- 3. Preprocessing and Data Preparation Functions ---
+# --- 3. Preprocessing and Data Preparation Functions (Unchanged) ---
 
 def preprocess_data(data):
     """Adds the target variable and defines the feature list."""
@@ -132,25 +129,21 @@ def prepare_data(data, features, window_size):
 
     scaled_features = feature_scaler.fit_transform(data[features])
 
-    # Create sequences: X is the window_size sequence, y is the price immediately after
     X = np.array([scaled_features[i - window_size : i] 
                   for i in range(window_size, len(scaled_features))])
     
-    # Target 'y' is the 'Target' column from the data frame, starting after the initial window_size
     y = data['Target'].values[window_size:]
 
-    # Normalize the target variable
     y = target_scaler.fit_transform(y.reshape(-1, 1)).flatten()
 
     return X, y, feature_scaler, target_scaler
 
-# --- 4. Model Training and Saving Functions ---
+# --- 4. Model Training and Saving Functions (Unchanged) ---
 
 @st.cache_resource(show_spinner="Training LSTM model (this might take a few minutes)...")
 def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batch_size=32, epochs=100):
     """Builds, trains, and returns the LSTM model."""
     
-    # Check if a trained model exists and load it
     model_path = os.path.join(MODEL_DIR, MODEL_FILENAME)
     if os.path.exists(model_path):
         st.info("Loading pre-trained model.")
@@ -170,7 +163,6 @@ def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batc
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     model.compile(optimizer=optimizer, loss='mean_squared_error', metrics=['mae'])
     
-    # Callbacks to improve training stability and prevent overfitting
     callbacks = [
         tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=7, min_lr=1e-7)
@@ -182,10 +174,9 @@ def train_lstm_model(X_train, y_train, X_test, y_test, learning_rate=0.001, batc
         batch_size=batch_size,
         validation_data=(X_test, y_test),
         callbacks=callbacks,
-        verbose=0 # Suppress detailed output during training
+        verbose=0 
     )
     
-    # Save the best model
     model.save(model_path)
     st.success(f"Model saved successfully to {model_path}.")
 
@@ -196,21 +187,15 @@ def save_scalers(feature_scaler, target_scaler):
     joblib.dump(feature_scaler, os.path.join(MODEL_DIR, FEATURE_SCALER_FILENAME))
     joblib.dump(target_scaler, os.path.join(MODEL_DIR, TARGET_SCALER_FILENAME))
 
-# --- 5. Prediction and Evaluation Functions ---
+# --- 5. Prediction and Evaluation Functions (Unchanged) ---
 
 def predict_next_day(model, data, features, feature_scaler, target_scaler, window_size):
     """Predicts the next day's stock price."""
     
-    # 1. Get the last 'window_size' rows of the feature data
     last_data = data[features].values[-window_size:]
-    
-    # 2. Scale the data
     last_data_scaled = feature_scaler.transform(last_data)
-    
-    # 3. Reshape for LSTM: (1, window_size, number_of_features)
     last_data_reshaped = last_data_scaled.reshape((1, window_size, len(features)))
 
-    # 4. Predict and Inverse Transform
     predicted_price_scaled = model.predict(last_data_reshaped, verbose=0)[0][0]
     predicted_price = target_scaler.inverse_transform([[predicted_price_scaled]])[0][0]
     
@@ -221,25 +206,24 @@ def calculate_prediction_intervals(model, X_test, y_test, target_scaler, alpha=0
     y_pred_scaled = model.predict(X_test, verbose=0).flatten()
     residuals = y_test - y_pred_scaled
     std_dev = np.std(residuals)
-    z_score = 1.96 # For a 95% confidence interval
+    z_score = 1.96 
 
     margin_of_error = z_score * std_dev
 
     lower_bound_scaled = y_pred_scaled - margin_of_error
     upper_bound_scaled = y_pred_scaled + margin_of_error
     
-    # Inverse transform all
     y_pred = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
     lower_bound = target_scaler.inverse_transform(lower_bound_scaled.reshape(-1, 1)).flatten()
     upper_bound = target_scaler.inverse_transform(upper_bound_scaled.reshape(-1, 1)).flatten()
     
     return y_pred, lower_bound, upper_bound
 
-# --- 6. Streamlit Main Function ---
+# --- 6. Streamlit Main Function (Modified) ---
 
 def main():
     st.set_page_config(page_title="LSTM Stock Price Predictor", layout="wide")
-    st.title("📈 Stock Price Prediction using Bidirectional LSTM")
+    st.title("📈 Stock Price Prediction using Bidirectional LSTM (Full History)")
     st.markdown("---")
 
     col1, col2 = st.columns([1, 2])
@@ -247,9 +231,8 @@ def main():
     with col1:
         ticker = st.text_input("Enter the stock ticker (e.g., AAPL):", "AAPL").upper()
         
-        # User selection for training/testing period
-        data_period_years = st.slider("Historical Data Period (Years)", 1, 5, 3)
-        st.info(f"Fetching approximately {data_period_years} years of data.")
+        # Removed the 'data_period_years' slider
+        st.info("Model will be trained on **complete historical data** available for this ticker.")
         
         test_size = st.slider("Test Set Size (%)", 5, 40, 20) / 100
         
@@ -257,9 +240,8 @@ def main():
             
             # --- Data Fetching and Preparation ---
             
-            # Use the longer period based on user input
-            lookback_days = data_period_years * 365 
-            data = fetch_stock_data(ticker, lookback_days)
+            # Fetch full historical data
+            data = fetch_stock_data(ticker)
             
             if data is None:
                 return
@@ -269,6 +251,11 @@ def main():
             # 1. Calculate features (requires long history)
             data = calculate_features(data)
             
+            # 💡 FIX from previous error: Check if the DataFrame is empty after cleaning
+            if data.empty:
+                st.error("Error: The DataFrame is empty after calculating features and removing NaN values. Try a different ticker or check for data issues.")
+                return
+
             # 2. Preprocess data and define feature list
             data, features = preprocess_data(data)
             
@@ -279,30 +266,25 @@ def main():
 
             # 4. Prepare data for LSTM (scaling and sequence creation)
             X, y, feature_scaler, target_scaler = prepare_data(data, features, WINDOW_SIZE)
-            save_scalers(feature_scaler, target_scaler) # Save scalers for deployment
+            save_scalers(feature_scaler, target_scaler) 
 
-            # 5. Split the data
+            # 5. Split the data - shuffle=False for time series integrity
             X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, shuffle=False # Keep time-series order
+                X, y, test_size=test_size, shuffle=False 
             )
 
             # --- Model Training ---
             
-            # The model is loaded/trained and saved within this function
             model = train_lstm_model(X_train, y_train, X_test, y_test)
             
             # --- Prediction and Evaluation ---
             
-            # Calculate prediction intervals and predictions for the test set
             y_pred, lower_bound, upper_bound = calculate_prediction_intervals(
                 model, X_test, y_test, target_scaler
             )
             
-            # Inverse transform the actual test values for plotting and metrics
             y_test_actual = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
 
-            # Predict the next day (unseen data)
-            # Use the full, final processed data frame for the last sequence input
             predicted_price = predict_next_day(
                 model, data, features, feature_scaler, target_scaler, WINDOW_SIZE
             )
@@ -345,7 +327,7 @@ def main():
             # Predicted Prices
             fig.add_trace(go.Scatter(x=plot_data['dates'], y=plot_data['y_pred'], mode='lines', name='Predicted Prices', line=dict(color='red', width=1)))
             
-            # Prediction Interval (using fill for better visualization)
+            # Prediction Interval
             fig.add_trace(go.Scatter(
                 x=plot_data['dates'].tolist() + plot_data['dates'].tolist()[::-1],
                 y=plot_data['upper_bound'].tolist() + plot_data['lower_bound'].tolist()[::-1],
