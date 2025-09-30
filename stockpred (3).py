@@ -132,30 +132,29 @@ def prepare_data(data, features, target, window_size):
 
 def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion):
     y_pred_scaled = model.predict(X_test, verbose=0).flatten()
-
+    
     # Invert Log Return scaling to get predicted log returns
-    y_test_log_return = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
     y_pred_log_return = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
-
-    # Get actual closing prices at time t (Price_t) and (Price_t+1) for the test set
-    # The 'Close' column in data_for_inversion corresponds to Price_t
-    close_t = data_for_inversion['Close'].values[-len(y_pred_log_return) - 1:-1]
-
-    # Actual Prices (Price_t+1)
+    
+    # Get Prices at time t (for inversion) and Actual Prices (Price_t+1) for the test set
+    close_t = data_for_inversion['Close'].values[-len(y_pred_log_return) - 1:-1] 
     y_test_actual = data_for_inversion['Close'].values[-len(y_pred_log_return):]
-
+    
     # Inverse transformation: Price_t+1 = Price_t * exp(Log_Return)
     y_pred_actual = close_t * np.exp(y_pred_log_return)
-
+    
     # Calculate intervals based on residuals of actual prices
     residuals = y_test_actual - y_pred_actual
     std_dev = np.std(residuals)
     z_score = 1.96
     margin_of_error = z_score * std_dev
-    lower_bound = y_pred_actual - margin_of_error
-    upper_bound = y_pred_actual + margin_of_error
-
-    return y_pred_actual, lower_bound, upper_bound, y_test_actual
+    
+    # Ensure all outputs are 1D arrays (by using .flatten() or being generated that way)
+    lower_bound = (y_pred_actual - margin_of_error).flatten()
+    upper_bound = (y_pred_actual + margin_of_error).flatten()
+    
+    # FIX: Ensure all primary outputs are explicitly flattened 1D arrays
+    return y_pred_actual.flatten(), lower_bound, upper_bound, y_test_actual.flatten()
 
 def display_evaluation_metrics(y_test_actual, y_pred):
     mae = mean_absolute_error(y_test_actual, y_pred)
