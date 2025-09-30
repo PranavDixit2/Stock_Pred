@@ -1,5 +1,3 @@
-
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -99,6 +97,13 @@ def calculate_prediction_intervals(model, X_test, y_test, target_scaler):
     y_pred_scaled = model.predict(X_test, verbose=0).flatten()
     y_test_actual = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
     y_pred_actual = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+
+    # Debug info for NaNs/Infs
+    if np.any(np.isnan(y_test_actual)) or np.any(np.isnan(y_pred_actual)):
+        st.warning("Warning: NaNs detected in inverse transformed values.")
+    if np.any(np.isinf(y_test_actual)) or np.any(np.isinf(y_pred_actual)):
+        st.warning("Warning: Infinite values detected in inverse transformed values.")
+
     residuals = y_test_actual - y_pred_actual
     std_dev = np.std(residuals)
     z_score = 1.96
@@ -108,10 +113,23 @@ def calculate_prediction_intervals(model, X_test, y_test, target_scaler):
     return y_pred_actual, lower_bound, upper_bound, y_test_actual
 
 def display_evaluation_metrics(y_test_actual, y_pred):
-    mae = mean_absolute_error(y_test_actual, y_pred)
-    mse = mean_squared_error(y_test_actual, y_pred)
+    y_test_actual = np.array(y_test_actual)
+    y_pred = np.array(y_pred)
+
+    # Clean NaNs and infinite values
+    mask = (~np.isnan(y_test_actual)) & (~np.isnan(y_pred)) & np.isfinite(y_test_actual) & np.isfinite(y_pred)
+    y_test_actual_clean = y_test_actual[mask]
+    y_pred_clean = y_pred[mask]
+
+    if len(y_test_actual_clean) == 0:
+        st.error("Error: No valid data points available for evaluation metrics after cleaning NaNs.")
+        return
+
+    mae = mean_absolute_error(y_test_actual_clean, y_pred_clean)
+    mse = mean_squared_error(y_test_actual_clean, y_pred_clean)
     rmse = np.sqrt(mse)
-    mape = np.mean(np.abs((y_test_actual - y_pred) / (y_test_actual + 1e-8))) * 100
+    mape = np.mean(np.abs((y_test_actual_clean - y_pred_clean) / (y_test_actual_clean + 1e-8))) * 100
+
     st.write("### Evaluation Metrics (on Test Set)")
     st.write(f"- Mean Absolute Error (MAE): ${mae:.2f}")
     st.write(f"- Root Mean Squared Error (RMSE): ${rmse:.2f}")
@@ -211,7 +229,13 @@ if st.button("Run Prediction"):
         joblib.dump((feature_scaler, target_scaler), scaler_path)
         st.success("Training complete and model saved.")
 
+    # Debug info for NaNs/Infs before evaluation
     y_pred, lower_bound, upper_bound, y_test_actual = calculate_prediction_intervals(model, X_test, y_test, target_scaler)
+    st.write(f"NaNs in y_test_actual: {np.isnan(y_test_actual).sum()}")
+    st.write(f"NaNs in y_pred: {np.isnan(y_pred).sum()}")
+    st.write(f"Infinite in y_test_actual: {np.isinf(y_test_actual).sum()}")
+    st.write(f"Infinite in y_pred: {np.isinf(y_pred).sum()}")
+
     predicted_price = predict_next_day(model, data_features, features, feature_scaler, target_scaler, WINDOW_SIZE)
 
     st.write(f"### Predicted next-day closing price for {TICKER}: ${predicted_price:.2f}")
