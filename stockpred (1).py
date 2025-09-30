@@ -7,7 +7,7 @@ Original file is located at
     https://colab.research.google.com/drive/1aGVe_ymZiElIln9cl3c6jWNQG_N0Jskq
 """
 
-!pip install yfinance joblib plotly tensorflow scikit-learn streamlit
+pip install yfinance joblib plotly tensorflow scikit-learn streamlit
 
 import streamlit as st
 import yfinance as yf
