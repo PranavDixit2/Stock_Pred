@@ -13,11 +13,9 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 from tensorflow.keras.models import Sequential
 
-# --- Feature calculation functions (omitted for brevity) ---
-
+# --- Feature calculation functions (unchanged) ---
 def calculate_ema(data, span):
     return data['Close'].ewm(span=span, adjust=False).mean()
-
 def calculate_rsi(data, window=14):
     delta = data['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -25,21 +23,18 @@ def calculate_rsi(data, window=14):
     rs = gain / (loss + 1e-8)
     rsi = 100 - (100 / (1 + rs))
     return rsi
-
 def calculate_bollinger_bands(data, window=20):
     sma = data['Close'].rolling(window=window).mean()
     std_dev = data['Close'].rolling(window=window).std()
     data['BB_upper'] = sma + (2 * std_dev)
     data['BB_lower'] = sma - (2 * std_dev)
     return data
-
 def calculate_macd(data, short_window=12, long_window=26, signal_window=9):
     short_ema = data['Close'].ewm(span=short_window, adjust=False).mean()
     long_ema = data['Close'].ewm(span=long_window, adjust=False).mean()
     data['MACD'] = short_ema - long_ema
     data['MACD_signal'] = data['MACD'].ewm(span=signal_window, adjust=False).mean()
     return data
-
 def calculate_atr(data, window=14):
     high_low = data['High'] - data['Low']
     high_close = np.abs(data['High'] - data['Close'].shift(1))
@@ -47,7 +42,6 @@ def calculate_atr(data, window=14):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     atr = tr.ewm(span=window, adjust=False).mean()
     return atr
-
 def calculate_features(data):
     data['EMA_9'] = calculate_ema(data, 9)
     data['EMA_21'] = calculate_ema(data, 21)
@@ -69,7 +63,6 @@ def calculate_features(data):
             data[f'Lag_{feature}_{lag}'] = data[feature].shift(lag)
     data.dropna(inplace=True)
     return data
-
 def preprocess_data(data):
     log_returns = np.log(data['Close'] / data['Close'].shift(1))
     target = log_returns.shift(-1)
@@ -91,13 +84,7 @@ def preprocess_data(data):
     data = data.loc[target.index] 
     return target, features
 
-def prepare_data(data_df, features, target_series, window_size, feature_scaler, target_scaler):
-    # Only scale and window the provided (sliced) data
-    scaled_features = feature_scaler.transform(data_df[features])
-    X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
-    y_raw = target_series.values[window_size:]
-    y = target_scaler.transform(y_raw.reshape(-1, 1)).flatten()
-    return X, y
+# --- Data Preparation Functions (modified) ---
 
 def fit_scalers(data_df, features, target_series):
     feature_scaler = MinMaxScaler()
@@ -106,12 +93,21 @@ def fit_scalers(data_df, features, target_series):
     target_scaler.fit(target_series.values.reshape(-1, 1))
     return feature_scaler, target_scaler
 
+def prepare_data(data_df, features, target_series, window_size, feature_scaler, target_scaler):
+    # Only scale and window the provided (sliced) data
+    scaled_features = feature_scaler.transform(data_df[features])
+    X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
+    y_raw = target_series.values[window_size:]
+    y = target_scaler.transform(y_raw.reshape(-1, 1)).flatten()
+    return X, y
+
+# --- Evaluation Functions ---
+
 def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion):
-    # Ensure all predictions are clean, 1D NumPy arrays
     y_pred_scaled = np.array(model.predict(X_test, verbose=0)).flatten()
     y_pred_log_return = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
     
-    # If data_for_inversion has been correctly sliced to length N+1 (P_t and P_t+1):
+    # Slicing P_t and P_t+1 (Data for inversion has length N_test + 1)
     close_t = data_for_inversion['Close'].values[:-1]
     y_test_actual = data_for_inversion['Close'].values[1:]
     
@@ -128,10 +124,22 @@ def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_fo
     return y_pred_actual.flatten(), lower_bound, upper_bound, y_test_actual.flatten()
 
 def display_evaluation_metrics(y_test_actual, y_pred):
-    mae = mean_absolute_error(y_test_actual, y_pred)
-    mse = mean_squared_error(y_test_actual, y_pred)
+    # FIX: Create safe, local copies to prevent contamination from inconsistent arrays
+    y_true_safe = np.array(y_test_actual)
+    y_pred_safe = np.array(y_pred)
+    
+    # Check for consistency before scikit-learn runs
+    if len(y_true_safe) != len(y_pred_safe):
+        st.error(f"FATAL ERROR: Inconsistent sample size in evaluation. Actual: {len(y_true_safe)}, Predicted: {len(y_pred_safe)}. Check data splitting logic.")
+        raise ValueError("Inconsistent numbers of samples found in evaluation inputs.")
+
+    mae = mean_absolute_error(y_true_safe, y_pred_safe)
+    mse = mean_squared_error(y_true_safe, y_pred_safe)
     rmse = np.sqrt(mse)
-    mape = np.mean(np.abs((y_test_actual - y_pred) / (y_test_actual + 1e-8))) * 100
+    
+    # Calculate MAPE using safe arrays
+    mape = np.mean(np.abs((y_true_safe - y_pred_safe) / (y_true_safe + 1e-8))) * 100
+    
     st.write("### Evaluation Metrics (on Test Set)")
     st.write(f"- Mean Absolute Error (MAE): ${mae:.2f}")
     st.write(f"- Root Mean Squared Error (RMSE): ${rmse:.2f}")
@@ -191,35 +199,26 @@ if st.button("Run Prediction (Final Fix)"):
         N_samples = len(data_for_lstm)
         test_size_df = max(int(N_samples * 0.2), 10)
         
-        # 1. SPLIT DATAFRAME FIRST (TRAIN & TEST)
+        # 1. SPLIT DATAFRAME FOR TRAINING
         train_data_df = data_for_lstm.iloc[:-test_size_df]
-        test_data_df = data_for_lstm.iloc[-test_size_df:]
-        
         train_target = target.iloc[:-test_size_df]
-        test_target = target.iloc[-test_size_df:]
         
-        # 2. FIT SCALERS ON FULL TRAINING DATASET (BEFORE WINDOWING)
+        # 2. FIT SCALERS ON FULL DATASET (OR TRAIN SET IF PREFERRED, here we use the full data for consistency)
         feature_scaler, target_scaler = fit_scalers(data_for_lstm, features, target)
 
-        # 3. CREATE WINDOWED ARRAYS (X_train, X_test, y_train, y_test)
-        # We MUST ensure the window size is respected.
-        if len(train_data_df) < WINDOW_SIZE:
-             st.error(f"Training data ({len(train_data_df)} samples) is too short for window size ({WINDOW_SIZE}).")
-             st.stop()
-             
-        # X_train and y_train
+        # 3. CREATE WINDOWED TRAINING ARRAYS
         X_train, y_train = prepare_data(train_data_df, features, train_target, WINDOW_SIZE, feature_scaler, target_scaler)
         
-        # X_test and y_test: Need to include the end of the training data in the test features for the first window
-        # Create a combined slice of (WINDOW_SIZE - 1) days of training data + test_data_df
-        test_feature_window_start_index = len(data_for_lstm) - test_size_df - WINDOW_SIZE + 1
+        # 4. CREATE WINDOWED TEST ARRAYS (ISOLATION FIX)
+        # We need data starting WINDOW_SIZE-1 days *before* the first test target to create the first test window.
+        test_start_index = N_samples - test_size_df - WINDOW_SIZE + 1
         
-        # The data we need to create the test set X_test. Includes overlap from training set.
-        data_for_X_test = data_for_lstm.iloc[test_feature_window_start_index:]
-        
-        # X_test and y_test
-        X_test, y_test = prepare_data(data_for_X_test, features, target.iloc[test_feature_window_start_index:], WINDOW_SIZE, feature_scaler, target_scaler)
+        # The data slice needed for the test X and y creation
+        data_for_X_test = data_for_lstm.iloc[test_start_index:]
+        target_for_y_test = target.iloc[test_start_index:]
 
+        # Create clean, isolated X_test and y_test arrays
+        X_test, y_test = prepare_data(data_for_X_test, features, target_for_y_test, WINDOW_SIZE, feature_scaler, target_scaler)
 
     if len(X_train) < 1:
         st.error(f"Insufficient samples ({len(X_train)}) after cleaning and windowing for training.")
@@ -227,10 +226,11 @@ if st.button("Run Prediction (Final Fix)"):
 
     N_test = len(y_test)
     
-    # 4. SLICE INVERSION DATA (cleanly isolated)
-    # This must be the last N_test + 1 days of the price data BEFORE the final prediction day.
-    data_for_inversion = data_for_lstm[['Close']].iloc[-(N_test + 1):].copy()
+    # 5. SLICE INVERSION DATA (N_test + 1 rows needed)
+    # This must be the last N_test + 1 rows of the 'Close' price from the data_for_lstm (aligned data).
+    data_for_inversion = data_for_lstm[['Close']].iloc[- (N_test + 1):].copy()
 
+    # --- Model Training/Loading ---
     if os.path.exists(model_path) and os.path.exists(scaler_path):
         model = load_model(model_path)
         feature_scaler, target_scaler = joblib.load(scaler_path)
@@ -264,7 +264,7 @@ if st.button("Run Prediction (Final Fix)"):
         joblib.dump((feature_scaler, target_scaler), scaler_path)
         st.success("Training complete and model saved.")
 
-    # Execute prediction and evaluation
+    # 6. Execute prediction and evaluation
     y_pred, lower_bound, upper_bound, y_test_actual = calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion)
     predicted_price = predict_next_day(model, data_for_lstm, features, feature_scaler, target_scaler, WINDOW_SIZE)
 
