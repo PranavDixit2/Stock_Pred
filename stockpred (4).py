@@ -111,30 +111,31 @@ def prepare_data(data, features, target, window_size):
 
 # --- CORRECTED FUNCTION FOR SHAPE/LENGTH MISMATCH ---
 def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion):
-    y_pred_scaled = model.predict(X_test, verbose=0).flatten()
+    # FIX: Explicitly cast to numpy array and ensure 1D shape immediately.
+    # This prevents subtle shape errors from Keras/TensorFlow predict returning weird types.
+    y_pred_scaled = np.array(model.predict(X_test, verbose=0)).flatten()
+    
     y_pred_log_return = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
-
-    # N is the length of the test set
-
-    # FIX: If data_for_inversion has been correctly sliced to length N+1 (P_t and P_t+1):
-    # close_t (P_t) is the first N prices.
+    
+    # N is the length of the test set, guaranteed by y_pred_log_return
+    
+    # If data_for_inversion has been correctly sliced to length N+1 (P_t and P_t+1):
     close_t = data_for_inversion['Close'].values[:-1]
-    # y_test_actual (P_t+1) is the last N prices.
     y_test_actual = data_for_inversion['Close'].values[1:]
-
+    
     # Inversion: ensures y_pred_actual has length N
-    y_pred_actual = close_t * np.exp(y_pred_log_return)
+    y_pred_actual = close_t * np.exp(y_pred_log_return) 
 
     # Calculate intervals (Length N)
     residuals = y_test_actual - y_pred_actual
     std_dev = np.std(residuals)
     z_score = 1.96
     margin_of_error = z_score * std_dev
-
-    # Ensure all primary outputs are explicitly flattened 1D arrays of length N
+    
+    # Return all arrays with guaranteed length N
     lower_bound = (y_pred_actual - margin_of_error).flatten()
     upper_bound = (y_pred_actual + margin_of_error).flatten()
-
+    
     return y_pred_actual.flatten(), lower_bound, upper_bound, y_test_actual.flatten()
 
 def display_evaluation_metrics(y_test_actual, y_pred):
