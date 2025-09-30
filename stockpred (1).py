@@ -8,6 +8,7 @@ import os
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+import tensorflow as tf
 
 # --- Feature calculation functions ---
 
@@ -36,7 +37,17 @@ def calculate_macd(data, short_window=12, long_window=26, signal_window=9):
     data['MACD_signal'] = data['MACD'].ewm(span=signal_window, adjust=False).mean()
     return data
 
+# New feature: Average True Range (ATR)
+def calculate_atr(data, window=14):
+    high_low = data['High'] - data['Low']
+    high_close = np.abs(data['High'] - data['Close'].shift(1))
+    low_close = np.abs(data['Low'] - data['Close'].shift(1))
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.ewm(span=window, adjust=False).mean()
+    return atr
+
 def calculate_features(data):
+    # Base Features
     data['EMA_9'] = calculate_ema(data, 9)
     data['EMA_21'] = calculate_ema(data, 21)
     data['EMA_50'] = calculate_ema(data, 50)
@@ -44,12 +55,14 @@ def calculate_features(data):
     data['RSI_14'] = calculate_rsi(data)
     data = calculate_bollinger_bands(data)
     data = calculate_macd(data)
+    data['ATR_14'] = calculate_atr(data) # Added ATR
     data['Volume_Change'] = data['Volume'].pct_change()
     data['Price_Change'] = data['Close'].pct_change()
 
+    # Lagged Features
     lag_features = [
         'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
-        'RSI_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal',
+        'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal',
         'Volume_Change', 'Price_Change'
     ]
     for feature in lag_features:
@@ -60,18 +73,25 @@ def calculate_features(data):
     return data
 
 def preprocess_data(data):
-    target = data['Close'].shift(-1)
-    data = data.dropna()
-    target = target.loc[data.index]
+    # **CHANGE:** Target is now next-day Log Returns (Target = log(Price_t+1 / Price_t))
+    data['Next_Close'] = data['Close'].shift(-1)
+    data['Log_Return'] = np.log(data['Next_Close'] / data['Close'])
+    
+    # Drop the last row which will have a NaN for Log_Return
+    data.dropna(subset=['Log_Return'], inplace=True)
+    
+    target = data['Log_Return']
+    data = data.loc[target.index] # Align features with the target
 
     base_features = [
         'Open', 'High', 'Low', 'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
-        'RSI_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal', 'Volume_Change', 'Price_Change'
+        'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal', 
+        'Volume_Change', 'Price_Change'
     ]
 
     lagged_feature_bases = [
         'Close', 'Volume', 'EMA_9', 'EMA_21', 'EMA_50', 'EMA_200',
-        'RSI_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal',
+        'RSI_14', 'ATR_14', 'BB_upper', 'BB_lower', 'MACD', 'MACD_signal',
         'Volume_Change', 'Price_Change'
     ]
 
@@ -82,87 +102,102 @@ def preprocess_data(data):
 
     return target, features
 
-def prepare_data(data, features, target, window_size=10):
+def prepare_data(data, features, target, window_size):
     feature_scaler = MinMaxScaler()
-    target_scaler = MinMaxScaler()
+    target_scaler = MinMaxScaler() # Still scale returns for training stability
 
     scaled_features = feature_scaler.fit_transform(data[features])
     X = np.array([scaled_features[i-window_size:i] for i in range(window_size, len(scaled_features))])
+    
     y_raw = target.values[window_size:]
     y = target_scaler.fit_transform(y_raw.reshape(-1, 1)).flatten()
 
     return X, y, feature_scaler, target_scaler
 
-def calculate_prediction_intervals(model, X_test, y_test, target_scaler):
+def calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion):
     y_pred_scaled = model.predict(X_test, verbose=0).flatten()
-    y_test_actual = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-    y_pred_actual = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+    
+    # Invert Log Return scaling
+    y_test_log_return = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+    y_pred_log_return = target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+    
+    # Actual Closing Prices (Price_t+1)
+    y_test_actual = data_for_inversion['Next_Close'].values[-len(y_test_log_return):]
+    
+    # Prices at time t (for inversion)
+    y_t_close = data_for_inversion['Close'].values[-len(y_test_log_return) - 1:-1]
 
-    # Debug info for NaNs/Infs
-    if np.any(np.isnan(y_test_actual)) or np.any(np.isnan(y_pred_actual)):
-        st.warning("Warning: NaNs detected in inverse transformed values.")
-    if np.any(np.isinf(y_test_actual)) or np.any(np.isinf(y_pred_actual)):
-        st.warning("Warning: Infinite values detected in inverse transformed values.")
-
+    # **CHANGE:** Inverse transformation logic: Price_t+1 = Price_t * exp(Log_Return)
+    y_pred_actual = y_t_close * np.exp(y_pred_log_return)
+    
+    # Calculate intervals based on residuals of actual prices
     residuals = y_test_actual - y_pred_actual
     std_dev = np.std(residuals)
     z_score = 1.96
     margin_of_error = z_score * std_dev
     lower_bound = y_pred_actual - margin_of_error
     upper_bound = y_pred_actual + margin_of_error
+    
     return y_pred_actual, lower_bound, upper_bound, y_test_actual
 
 def display_evaluation_metrics(y_test_actual, y_pred):
-    y_test_actual = np.array(y_test_actual)
-    y_pred = np.array(y_pred)
-
-    # Clean NaNs and infinite values
-    mask = (~np.isnan(y_test_actual)) & (~np.isnan(y_pred)) & np.isfinite(y_test_actual) & np.isfinite(y_pred)
-    y_test_actual_clean = y_test_actual[mask]
-    y_pred_clean = y_pred[mask]
-
-    if len(y_test_actual_clean) == 0:
-        st.error("Error: No valid data points available for evaluation metrics after cleaning NaNs.")
-        return
-
-    mae = mean_absolute_error(y_test_actual_clean, y_pred_clean)
-    mse = mean_squared_error(y_test_actual_clean, y_pred_clean)
+    mae = mean_absolute_error(y_test_actual, y_pred)
+    mse = mean_squared_error(y_test_actual, y_pred)
     rmse = np.sqrt(mse)
-    mape = np.mean(np.abs((y_test_actual_clean - y_pred_clean) / (y_test_actual_clean + 1e-8))) * 100
-
+    # MAPE is less meaningful when using log returns but included for completeness
+    mape = np.mean(np.abs((y_test_actual - y_pred) / (y_test_actual + 1e-8))) * 100
     st.write("### Evaluation Metrics (on Test Set)")
     st.write(f"- Mean Absolute Error (MAE): ${mae:.2f}")
     st.write(f"- Root Mean Squared Error (RMSE): ${rmse:.2f}")
     st.write(f"- Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
 
-def plot_predictions(data, y_test_actual, y_pred, lower_bound, upper_bound):
-    test_dates = data.index[-len(y_test_actual):]
+def plot_predictions(data_for_lstm, y_test_actual, y_pred, lower_bound, upper_bound):
+    test_dates = data_for_lstm.index[-len(y_test_actual):]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=test_dates, y=y_test_actual, mode='lines', name='Actual Prices', line=dict(color='blue', width=2)))
     fig.add_trace(go.Scatter(x=test_dates, y=y_pred, mode='lines', name='Predicted Prices', line=dict(color='red', width=2, dash='dot')))
     fig.add_trace(go.Scatter(x=test_dates, y=upper_bound, mode='lines', name='Upper Bound (95% CI)', line=dict(color='rgba(128, 128, 128, 0.5)', width=0), showlegend=False))
     fig.add_trace(go.Scatter(x=test_dates, y=lower_bound, mode='lines', name='95% Confidence Interval', line=dict(color='rgba(128, 128, 128, 0.5)', width=0), fill='tonexty', fillcolor='rgba(192, 192, 192, 0.3)'))
-    fig.update_layout(title='B-LSTM T+1 Forecast Performance', xaxis_title='Date', yaxis_title='Price (USD)', template='plotly_white')
+    fig.update_layout(title='B-LSTM T+1 Forecast Performance (Log Returns Target)', xaxis_title='Date', yaxis_title='Price (USD)', template='plotly_white')
     st.plotly_chart(fig, use_container_width=True)
 
-def predict_next_day(model, data_processed, features, feature_scaler, target_scaler, window_size=10):
-    last_data = data_processed[features].values[-window_size:]
-    last_data_scaled = feature_scaler.transform(last_data)
-    last_data_reshaped = last_data_scaled.reshape((1, window_size, len(features)))
-    predicted_price_scaled = model.predict(last_data_reshaped, verbose=0)
-    predicted_price = target_scaler.inverse_transform(predicted_price_scaled).flatten()
-    return predicted_price[0]
+def predict_next_day(model, data_processed, features, feature_scaler, target_scaler, window_size):
+    # Data for the current day (t)
+    current_data = data_processed[features].values[-1].reshape(1, -1)
+    
+    # Data for the lookback window
+    last_window_data = data_processed[features].values[-window_size:]
+    
+    # Scale the window data
+    last_window_scaled = feature_scaler.transform(last_window_data)
+    last_window_reshaped = last_window_scaled.reshape((1, window_size, len(features)))
+    
+    # Predict the next-day log return
+    predicted_log_return_scaled = model.predict(last_window_reshaped, verbose=0)
+    
+    # Invert scaling to get the actual predicted log return
+    predicted_log_return = target_scaler.inverse_transform(predicted_log_return_scaled).flatten()[0]
+    
+    # Get today's closing price
+    close_t = data_processed['Close'].iloc[-1]
+    
+    # **CHANGE:** Calculate the next-day price (t+1)
+    predicted_price = close_t * np.exp(predicted_log_return)
+    
+    return predicted_price
 
 # --- Streamlit UI ---
 
-st.title("Stock Price Prediction with Bidirectional LSTM")
-st.write("Predict next-day closing price with confidence intervals and evaluation metrics.")
+st.title("Stock Price Prediction with Bidirectional LSTM (Log Returns)")
+st.write("Predict next-day closing price with improved model architecture and log returns target.")
 
 TICKER = st.text_input("Enter Stock Ticker (e.g. AAPL)", value="AAPL").upper()
-WINDOW_SIZE = 10
+
+# **CHANGE:** Increased lookback window from 10 to 20
+WINDOW_SIZE = st.sidebar.slider("LSTM Lookback Window", min_value=10, max_value=30, value=20) 
 TRAIN_EPOCHS = 50
 
-if st.button("Run Prediction"):
+if st.button("Run Prediction (Improved Model)"):
 
     with st.spinner("Fetching data..."):
         data_raw = yf.download(TICKER, period="5y", progress=False)
@@ -177,9 +212,12 @@ if st.button("Run Prediction"):
             st.stop()
 
     with st.spinner("Preprocessing data..."):
-        target, features = preprocess_data(data_features.copy())
-        data_for_lstm = data_features.loc[target.index].assign(Target=target)
-        X, y, feature_scaler, target_scaler = prepare_data(data_for_lstm, features, data_for_lstm['Target'], WINDOW_SIZE)
+        # target is Log_Return, features is the list of predictors
+        target, features = preprocess_data(data_features.copy()) 
+        # data_for_lstm includes Close, Next_Close, and Log_Return
+        data_for_lstm = data_features.loc[target.index].assign(Log_Return=target, Next_Close=data_features['Next_Close'].loc[target.index])
+        
+        X, y, feature_scaler, target_scaler = prepare_data(data_for_lstm, features, data_for_lstm['Log_Return'], WINDOW_SIZE)
 
     if len(X) < 30:
         st.error(f"Insufficient samples ({len(X)}) after cleaning and windowing. Need at least 30.")
@@ -188,9 +226,13 @@ if st.button("Run Prediction"):
     test_size = max(int(len(X) * 0.2), 10)
     X_train, X_test = X[:-test_size], X[-test_size:]
     y_train, y_test = y[:-test_size], y[-test_size:]
+    
+    # data_for_inversion contains the 'Close' and 'Next_Close' values needed to convert 
+    # the scaled log returns back to actual prices for the test set.
+    data_for_inversion = data_for_lstm.iloc[WINDOW_SIZE:]
 
-    model_path = f"lstm_model_{TICKER}.keras"
-    scaler_path = f"scalers_{TICKER}.joblib"
+    model_path = f"lstm_model_returns_{TICKER}.keras"
+    scaler_path = f"scalers_returns_{TICKER}.joblib"
 
     if os.path.exists(model_path) and os.path.exists(scaler_path):
         model = load_model(model_path)
@@ -201,13 +243,14 @@ if st.button("Run Prediction"):
         from tensorflow.keras.regularizers import l2
         from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
         from tensorflow.keras.models import Sequential
-        import tensorflow as tf
 
         input_shape = (X_train.shape[1], X_train.shape[2])
         model = Sequential()
-        model.add(Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(0.001)), input_shape=input_shape))
+        # **CHANGE:** L2 Regularization reduced from 0.001 to 0.0005
+        model.add(Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(0.0005)), input_shape=input_shape))
         model.add(Dropout(0.2))
-        model.add(Bidirectional(LSTM(32, kernel_regularizer=l2(0.001))))
+        # **CHANGE:** L2 Regularization reduced from 0.001 to 0.0005
+        model.add(Bidirectional(LSTM(32, kernel_regularizer=l2(0.0005))))
         model.add(Dropout(0.2))
         model.add(Dense(1))
         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mean_squared_error', metrics=['mae'])
@@ -220,7 +263,7 @@ if st.button("Run Prediction"):
         history = model.fit(
             X_train, y_train,
             epochs=TRAIN_EPOCHS,
-            batch_size=32,
+            batch_size=64,
             validation_data=(X_test, y_test),
             callbacks=callbacks_list,
             verbose=0
@@ -229,14 +272,8 @@ if st.button("Run Prediction"):
         joblib.dump((feature_scaler, target_scaler), scaler_path)
         st.success("Training complete and model saved.")
 
-    # Debug info for NaNs/Infs before evaluation
-    y_pred, lower_bound, upper_bound, y_test_actual = calculate_prediction_intervals(model, X_test, y_test, target_scaler)
-    st.write(f"NaNs in y_test_actual: {np.isnan(y_test_actual).sum()}")
-    st.write(f"NaNs in y_pred: {np.isnan(y_pred).sum()}")
-    st.write(f"Infinite in y_test_actual: {np.isinf(y_test_actual).sum()}")
-    st.write(f"Infinite in y_pred: {np.isinf(y_pred).sum()}")
-
-    predicted_price = predict_next_day(model, data_features, features, feature_scaler, target_scaler, WINDOW_SIZE)
+    y_pred, lower_bound, upper_bound, y_test_actual = calculate_prediction_intervals(model, X_test, y_test, target_scaler, data_for_inversion)
+    predicted_price = predict_next_day(model, data_for_lstm, features, feature_scaler, target_scaler, WINDOW_SIZE)
 
     st.write(f"### Predicted next-day closing price for {TICKER}: ${predicted_price:.2f}")
 
