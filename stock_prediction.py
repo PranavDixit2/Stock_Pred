@@ -258,6 +258,8 @@ def main():
         
         test_size = st.slider("Test Set Size (%)", 5, 40, 20) / 100
         
+        # --- (Inside the main function, within the 'if st.button' block) ---
+        
         if st.button("Run Prediction & Training"):
             
             # --- Data Fetching and Preparation ---
@@ -267,13 +269,23 @@ def main():
             if data is None:
                 return
             
-            # --- Robust Data Validation (Fix 1) ---
+            # 💡 CRITICAL FIX: Ensure 'Close' column exists before accessing it
+            if 'Close' not in data.columns:
+                st.error("Error: The fetched data does not contain a 'Close' price column. The ticker may be invalid, or the yfinance API failed to return standard data.")
+                return
+
+            # --- Robust Data Validation ---
+            # Now that we know 'Close' exists, we can use it.
             if data[['Open', 'Close', 'Volume']].isnull().all(axis=0).any():
                 st.error("Error: Critical columns (Open, Close, or Volume) are missing or entirely NaN in the raw data. Cannot proceed.")
                 return
+                
+            # This line caused the error, now protected by the check above.
             data.dropna(subset=['Close'], inplace=True) 
-
+            
             st.success(f"Successfully fetched {len(data)} trading days of data for {ticker}.")
+
+            # ... (rest of the code follows) ...
 
             # 1. Calculate features 
             data = calculate_features(data)
@@ -375,3 +387,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
