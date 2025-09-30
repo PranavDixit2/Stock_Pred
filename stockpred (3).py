@@ -198,7 +198,7 @@ def predict_next_day(model, data_processed, features, feature_scaler, target_sca
     # Calculate the next-day price (Price_t+1)
     predicted_price = close_t * np.exp(predicted_log_return)
 
-    return predicted_price
+    return float(predicted_price)
 
 # --- Streamlit UI ---
 
