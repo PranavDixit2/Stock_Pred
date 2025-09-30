@@ -210,12 +210,15 @@ if st.button("Run Prediction (Improved Model)"):
     y_train, y_test = y[:-test_size], y[-test_size:]
 
     N_test = len(y_test)
+    data_for_inversion_all = data_for_lstm.iloc[WINDOW_SIZE:].copy() 
+    N_test = len(y_test)
+    data_for_inversion = data_for_inversion_all[['Close']].iloc[-(N_test + 1):].copy()
 
     # FIX: Slicing the data_for_inversion to be exactly N_test + 1 rows long
     # This provides the N_test prices for P_t and the N_test prices for P_t+1
     # which is required by the corrected calculate_prediction_intervals function.
-    data_for_inversion_all = data_for_lstm.iloc[WINDOW_SIZE:]
-    data_for_inversion = data_for_inversion_all['Close'].iloc[-(N_test + 1):].to_frame().copy()
+    #data_for_inversion_all = data_for_lstm.iloc[WINDOW_SIZE:]
+    #data_for_inversion = data_for_inversion_all['Close'].iloc[-(N_test + 1):].to_frame().copy()
 
 
     if os.path.exists(model_path) and os.path.exists(scaler_path):
